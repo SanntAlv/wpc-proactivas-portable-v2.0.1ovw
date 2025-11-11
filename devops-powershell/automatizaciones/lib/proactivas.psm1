@@ -213,49 +213,21 @@ class Proactiva {
             }
         }
     }
-    processVm($vms, $clusters, $allSnapshots, $allConnectedIsos, $allNetworkAdapters) {
-        $vms = $vms | ForEach-Object { $_ } # Aplanar la lista
+    processVm($vms, $clusters) {
+        $vms = $vms | ForEach-Object { $_ }
 
-        Write-Host "`tProcessing network adapters (fast mode)..." -NoNewline
-        
-        # --- [OPTIMIZADO] Eliminamos los comandos "Get-" pesados ---
-        # $allNetworkAdapters = $vms | Get-NetworkAdapter  <-- ELIMINADO
-        # $allConnectedIsos = $vms | Get-CDDrive | ...      <-- ELIMINADO
-        
-        # Asignamos las listas recibidas a las variables que usa el resto de la función
-        $snapshots = $allSnapshots
-        $connectedIsos = $allConnectedIsos
-
-        # Ya no necesitamos llamar a $this.processvNetwork aquí,
-        # porque la lista $allNetworkAdapters se pasará desde Start-DatosProactivas
-
-        Write-Host "`tCreating lookup tables..." -NoNewline
-        
-        $snapshotLookup = $snapshots | Group-Object -Property {$_.VM.Id} -AsHashTable
-        $isoLookup = $connectedIsos | Group-Object -Property ParentId -AsHashTable
-        $adapterLookup = $allNetworkAdapters | Group-Object -Property ParentId -AsHashTable
-        
-        Write-Host "`tProcessing VMs (fast mode)..." -NoNewline
-        for ($count = 0; $count -lt $vms.Count; $count++) {
+        Write-Host "`tProcessing network adapters..." -NoNewline
+        $snapshots = $vms | Get-Snapshot
+        $connectedIsos = $vms | Get-CDDrive | Where-Object { $null -ne $_.IsoPath }
+        $allNetworkAdapters = $vms | Get-NetworkAdapter
+        $this.processvNetwork($allNetworkAdapters)
+        Write-Host "`tProcessing VMs..." -NoNewline
+        for ($count = 0; $count -lt $vms.Count; $count++) { # Usamos .Count que es más robusto
             $vm = $vms[$count]
             Show-Progress $vms.Count ($count + 1)
-            
-            $networkAdapters = $adapterLookup[$vm.Id]
-            $nicCount = if ($networkAdapters) { $networkAdapters.Count } else { 0 }
-            
-            $snapshotCount = 0
-            if ($snapshotLookup.ContainsKey($vm.Id)) {
-                $snapshotCount = $snapshotLookup[$vm.Id].Count
-            }
-            
-            $isoPath = $null
-            if ($isoLookup.ContainsKey($vm.Id)) {
-                $isoPath = $isoLookup[$vm.Id][0].IsoPath
-            }
-            
+            $networkAdapters = $allNetworkAdapters | Where-Object { $_.ParentId -eq $vm.Id }
+            $nicCount = $networkAdapters.length
             $toolsRequredVersion = $this.getToolsReference($vm.VMHost)
-            
-            # ... (El resto de la función que crea el $this.vmReport += [PSCustomObject]... se mantiene igual)
             $this.vmReport += [PSCustomObject]@{
                 vCenter              = $this.currentVCenter
                 VM                   = $vm.Name
@@ -266,13 +238,13 @@ class Proactiva {
                 vCPU                 = $vm.NumCpu
                 "Memory MB"          = $vm.MemoryMB
                 HardwareVersion      = $vm.HardwareVersion
-                Snapshots            = $snapshotCount
+                Snapshots            = ($snapshots | Where-Object { $_.VM -eq $vm }).length
                 ToolsStatus          = try { $vm.ExtensionData.Guest.ToolsStatus.ToString() } Catch { "VM has not been scanned" };
                 ToolsVersion         = $vm.ExtensionData.Guest.ToolsVersion
                 ToolsRequiredVersion = $toolsRequredVersion
                 "SO (vCenter)"       = $vm.ExtensionData.Config.GuestFullName
                 "SO (Tools)"         = $vm.ExtensionData.Guest.GuestFullName
-                IsoConnected         = $isoPath
+                IsoConnected         = ($connectedIsos | Where-Object { $_.ParentId -eq $vm.Id }).IsoPath
                 Adapter_01           = if ($nicCount -gt 0) { $networkAdapters[0].Type.ToString() } else { "" } 
                 Adapter_02           = if ($nicCount -gt 1) { $networkAdapters[1].Type.ToString() } else { "" } 
                 Adapter_03           = if ($nicCount -gt 2) { $networkAdapters[2].Type.ToString() } else { "" } 
@@ -287,7 +259,6 @@ class Proactiva {
         }
     }
     processvNetwork($allNetworkAdapters) {
-        # --- [OPTIMIZADO] La función ahora solo procesa la lista, no la recolecta ---
         for ($count = 0; $count -lt $allNetworkAdapters.length; $count++) {
             Show-Progress $allNetworkAdapters.length ($count + 1)
             $networkadapter = $allNetworkAdapters[$count]
@@ -457,11 +428,8 @@ class Proactiva {
         }
     }
     processKernelAdapters($hosts) {
-        Write-Host "`tProcessing VMkernel Adapters (fast mode)..." -NoNewline
-        
-        # --- [OPTIMIZADO] Hacemos UNA sola llamada para todos los hosts ---
+        Write-Host "`tProcessing VMkernel Adapters..." -NoNewline
         $kernelAdapters = $hosts | Get-VMHostNetworkAdapter -ErrorAction SilentlyContinue | Where-Object { $_.Name -match "vmk[0-9]+" }
-        
         for ($count = 0; $count -lt $kernelAdapters.length; $count++) {
             Show-Progress $kernelAdapters.length ($count + 1)
             $ka = $kernelAdapters[$count]

@@ -21,20 +21,19 @@ function Start-DatosProactivas($vcenters){
 
     foreach($vcenter in $vcenters.conn){
         $proactiva.setCurrentVcenter($vcenter)
-        Write-Host "`nProcessing vCenter: $($vcenter.Name)" -ForegroundColor Cyan
+        Write-Host "`nProcessing vCenter: $($vcenter.Name)"
         
         Write-Host "`tGathering top-level objects..."
         $hosts = Get-VMHost -Server $vcenter
         $clusters = Get-Cluster -Server $vcenter
         $vdswitches = Get-VDSwitch -Server $vcenter
-        Write-Host "`tFound $($hosts.Count) Hosts, $($clusters.Count) Clusters, $($vdswitches.Count) vDS."
+        $vms = Get-VM -Server $vcenter  # <--- LÍNEA AGREGADA
 
-        # Creamos listas maestras para TODOS los datos
+        # LÍNEA MODIFICADA para incluir el conteo de VMs
+        Write-Host "`tFound $($hosts.Count) Hosts, $($clusters.Count) Clusters, $($vms.Count) VMs, $($vdswitches.Count) vDS."
+
         $allVms = [System.Collections.ArrayList]@()
         $allSnapshots = [System.Collections.ArrayList]@()
-        $allNetworkAdapters = [System.Collections.ArrayList]@()
-        $allConnectedIsos = [System.Collections.ArrayList]@()
-        $allKernelAdapters = [System.Collections.ArrayList]@()
         
         Write-Host "`tStarting batch collection (this may take a while)..."
         for ($i = 0; $i -lt $hosts.Count; $i++) {
@@ -42,21 +41,15 @@ function Start-DatosProactivas($vcenters){
             Write-Progress -Activity "Collecting data from $($vcenter.Name)" -Status "Processing Host $($i+1)/$($hosts.Count): $($h.Name)" -PercentComplete (($i / $hosts.Count) * 100)
             
             $vmsOnHost = @(Get-VM -Location $h)
+            
             if ($vmsOnHost) { 
                 [void]$allVms.AddRange($vmsOnHost) 
                 
                 $snapshotsOnHost = @(Get-Snapshot -VM $vmsOnHost)
-                if ($snapshotsOnHost) { [void]$allSnapshots.AddRange($snapshotsOnHost) }
-                
-                $networkAdaptersOnHost = @($vmsOnHost | Get-NetworkAdapter)
-                if ($networkAdaptersOnHost) { [void]$allNetworkAdapters.AddRange($networkAdaptersOnHost) }
-                
-                $connectedIsosOnHost = @($vmsOnHost | Get-CDDrive | Where-Object { $null -ne $_.IsoPath })
-                if ($connectedIsosOnHost) { [void]$allConnectedIsos.AddRange($connectedIsosOnHost) }
+                if ($snapshotsOnHost) { 
+                    [void]$allSnapshots.AddRange($snapshotsOnHost) 
+                }
             }
-            
-            $kernelAdaptersOnHost = @($h | Get-VMHostNetworkAdapter -ErrorAction SilentlyContinue | Where-Object { $_.Name -match "vmk[0-9]+" })
-            if ($kernelAdaptersOnHost) { [void]$allKernelAdapters.AddRange($kernelAdaptersOnHost) }
         }
         Write-Progress -Activity "Collection Complete" -Completed
 
@@ -74,11 +67,11 @@ function Start-DatosProactivas($vcenters){
         Write-Host "`tBatch collection finished. Processing reports..."
         $proactiva.processEsxi($hosts)
         $proactiva.processVcenter($vCenterData) 
-        $proactiva.processvNetwork($allNetworkAdapters)
-        $proactiva.processVm($allVms, $clusters, $allSnapshots, $allConnectedIsos, $allNetworkAdapters)
+        #$proactiva.processNic($hosts, $vdswitches)
+        $proactiva.processVm($allVms, $clusters) 
         $proactiva.processDatastore($hosts)
         $proactiva.processSwitch($hosts)
-        $proactiva.processKernelAdapters($allKernelAdapters) 
+        $proactiva.processKernelAdapters($hosts)
         $proactiva.processSnapshot($allSnapshots) 
         $proactiva.processPartitions($allVms) 
         $proactiva.processVcenterSizing($allVms, $hosts) 
