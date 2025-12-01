@@ -65,6 +65,7 @@ function Start-DatosProactivas($vcenters){
         }
 
         Write-Host "`tBatch collection finished. Processing reports..."
+        $proactiva.processCertificates()
         $proactiva.processEsxi($hosts)
         $proactiva.processVcenter($vCenterData) 
         #$proactiva.processNic($hosts, $vdswitches)

@@ -30,6 +30,7 @@ class Proactiva {
     $vNetworkReport = [System.Collections.ArrayList]@()
     $vLicenseReport = [System.Collections.ArrayList]@()
     $vCenterReport = [System.Collections.ArrayList]@()
+    $certificateReport = [System.Collections.ArrayList]@()
 
 
     processEsxi($hosts) {
@@ -502,8 +503,183 @@ class Proactiva {
     #    }
     #}
 
+    processCertificates() {
+        Write-Host "`n--- INICIO DE RECOLECCIÓN DE CERTIFICADOS ---" -ForegroundColor Yellow
+        
+        try {
+            Import-Module VMware.VimAutomation.Cis.Core -ErrorAction Stop
+        } catch {
+            Write-Warning "No se pudo cargar el módulo VMware.VimAutomation.Cis.Core."
+            return
+        }
 
+        # Pedimos los datos manualmente
+        $cisFQDN = Read-Host "Ingrese el FQDN del vCenter para conectar a la API CIS"
+        $cisCreds = Get-Credential -Message "Ingrese credenciales para $cisFQDN"
+        $cisConnection = $null
+        
+        try {
+            Write-Host "Conectando a CIS Service..."
+            $cisConnection = Connect-CisServer -Server $cisFQDN -Credential $cisCreds -ErrorAction Stop
+            Write-Host "-> Conexión CIS Exitosa." -ForegroundColor Green
+        }
+        catch {
+            Write-Warning "Falló la conexión CIS: $($_.Exception.Message)"
+            Read-Host "Presiona Enter para continuar sin certificados..."
+            return
+        }
 
+        $hoy = (Get-Date)
+        $fechaLimite = $hoy.AddDays(30)
+        $huboError = $false
+
+        # --- A. MACHINE SSL CERTIFICATE ---
+        Write-Host "`t -> Obteniendo Machine SSL..."
+        try {
+            $tlsService = Get-CisService -Name "com.vmware.vcenter.certificate_management.vcenter.tls"
+            $tlsCertData = $tlsService.get()
+
+            $validTo = Get-Date $tlsCertData.valid_to
+            $validFrom = Get-Date $tlsCertData.valid_from
+
+            $status = "Valid"
+            if ($hoy -gt $validTo) { $status = "Expirado" }
+            elseif ($fechaLimite -gt $validTo) { $status = "Expira Pronto" }
+
+            $this.certificateReport += [PSCustomObject]@{
+                vCenter      = $cisFQDN
+                Ubicacion    = "Machine SSL"
+                Subject      = $tlsCertData.subject_dn
+                Status       = $status
+                "Valid From" = $validFrom
+                "Valid Until"= $validTo
+                Emisor       = $tlsCertData.issuer_dn
+            }
+        }
+        catch {
+            Write-Warning "Error obteniendo Machine SSL: $($_.Exception.Message)"
+            $huboError = $true
+        }
+
+        # --- B. VMCA_ROOT y STS (NUEVO) ---
+        Write-Host "`t -> Obteniendo VMCA_ROOT y STS..."
+        try {
+            # 1. Usamos el servicio de "signing_certificate"
+            $signingCertService = Get-CisService -Name "com.vmware.vcenter.certificate_management.vcenter.signing_certificate"
+            $signingCertsData = $signingCertService.get().signing_cert_chains.cert_chain
+
+            # 2. Este endpoint devuelve un array de strings PEM (uno para VMCA, otro para STS)
+            foreach ($pemString in $signingCertsData) {
+                try {
+                    # 3. Reutilizamos la lógica de limpieza manual que sabemos que funciona
+                    $cleanBase64 = $pemString -replace "-----BEGIN CERTIFICATE-----", ""
+                    $cleanBase64 = $cleanBase64 -replace "-----END CERTIFICATE-----", ""
+                    $cleanBase64 = $cleanBase64 -replace "\s", "" # Quita todos los espacios/saltos
+
+                    $certBytes = [System.Convert]::FromBase64String($cleanBase64)
+                    $cert = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2(,$certBytes)
+
+                    # 4. Determinamos el tipo basado en el Subject (como en el script de referencia)
+                    $certType = "VMCA_ROOT"
+                    if ($cert.Subject -match "CN=ssoserverSign") { 
+                        $certType = "STS" 
+                    }
+
+                    # 5. Calculamos el Status
+                    $status = "Valid"
+                    if ($hoy -gt $cert.NotAfter) { $status = "Expirado" }
+                    elseif ($fechaLimite -gt $cert.NotAfter) { $status = "Expira Pronto" }
+
+                    # 6. Agregamos al reporte
+                    $this.certificateReport += [PSCustomObject]@{
+                        vCenter      = $cisFQDN
+                        Ubicacion    = $certType # Nombre dinámico
+                        Subject       = $cert.Subject
+                        Status       = $status
+                        "Valid From" = $cert.NotBefore
+                        "Valid Until"= $cert.NotAfter
+                        Emisor       = $cert.Issuer
+                    }
+                }
+                catch {
+                    Write-Warning "No se pudo parsear un certificado (VMCA/STS). Error específico: $($_.Exception.Message)"
+                }
+            }
+        }
+        catch {
+            Write-Warning "Error obteniendo lista de VMCA/STS: $($_.Exception.Message)"
+            $huboError = $true
+        }
+
+        # --- C. TRUSTED ROOT CHAINS (CORREGIDO) ---
+        # (Sección B renombrada a C)
+        Write-Host "`t -> Obteniendo Trusted Roots..."
+        try {
+            $rootService = Get-CisService -Name "com.vmware.vcenter.certificate_management.vcenter.trusted_root_chains"
+            $chains = $rootService.list().chain
+
+            foreach ($chainId in $chains) {
+                $certChainData = $rootService.get($chainId)
+                $rawCertData = $certChainData.cert_chain.cert_chain
+
+                if ($rawCertData -is [Array]) {
+                    $pemString = $rawCertData -join "`n"
+                } else {
+                    $pemString = $rawCertData
+                }
+
+                $pattern = "(?ms)-----BEGIN CERTIFICATE-----.*?-----END CERTIFICATE-----"
+                $matches = [regex]::Matches($pemString, $pattern)
+
+                if ($matches.Count -eq 0) {
+                    Write-Warning "No se encontraron bloques de certificados en la cadena $chainId"
+                    continue
+                }
+
+                foreach ($match in $matches) {
+                    try {
+                        $singleCertPem = $match.Value
+
+                        $cleanBase64 = $singleCertPem -replace "-----BEGIN CERTIFICATE-----", ""
+                        $cleanBase64 = $cleanBase64 -replace "-----END CERTIFICATE-----", ""
+                        $cleanBase64 = $cleanBase64 -replace "\s", "" 
+
+                        $certBytes = [System.Convert]::FromBase64String($cleanBase64)
+                        $rootCert = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2(,$certBytes)
+
+                        $status = "Valid"
+                        if ($hoy -gt $rootCert.NotAfter) { $status = "Expirado" }
+                        elseif ($fechaLimite -gt $rootCert.NotAfter) { $status = "Expira Pronto" }
+
+                        $this.certificateReport += [PSCustomObject]@{
+                            vCenter      = $cisFQDN
+                            Ubicacion    = "Trusted Root"
+                            Nombre       = $rootCert.Subject
+                            Status       = $status
+                            "Valid From" = $rootCert.NotBefore
+                            "Valid Until"= $rootCert.NotAfter
+                            Emisor       = $rootCert.Issuer
+                        }
+                    }
+                    catch {
+                        Write-Warning "Error al procesar un certificado individual dentro de la cadena: $($_.Exception.Message)"
+                    }
+                }
+            }
+        }
+        catch {
+            Write-Warning "Error obteniendo lista de Trusted Roots: $($_.Exception.Message)"
+            $huboError = $true
+        }
+
+        Disconnect-CisServer -Server $cisConnection -Confirm:$false
+        
+        if (-not $huboError) {
+            Write-Host "--- FIN RECOLECCIÓN CERTIFICADOS (Éxito) ---" -ForegroundColor Green
+        } else {
+            Write-Host "--- FIN RECOLECCIÓN CERTIFICADOS (Con advertencias) ---" -ForegroundColor Yellow
+        }
+    }
 
     setCurrentVcenter($vcenter) {
         $this.currentVCenter = $vcenter
@@ -523,7 +699,8 @@ class Proactiva {
             "Sizing"            = $this.sizingReport;
             "vDS"               = $this.vdsReport;
             "vNetwork"          = $this.vNetworkReport;
-            "vLicense"          = $this.vLicenseReport
+            "vLicense"          = $this.vLicenseReport;
+            "Certificados"      = $this.certificateReport
         }
     }
 
