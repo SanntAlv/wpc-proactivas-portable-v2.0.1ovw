@@ -554,20 +554,17 @@ class Proactiva {
     
     processAlarmCheck($hosts, $vcenterConnection) {
         Write-Host "`tProcessing Alarm Check (Extraction & Test)..." -NoNewline
-
-        # [CLAVE] Capturamos el contexto explícito
         $serverContext = $this.currentVCenter
         $vcenterName = $vcenterConnection.Name
 
         $alarmName = "Falso Positivo $($serverContext.Name)"
-        $sourceAlarmName = "Host Battery Status" 
+        $sourceAlarmName = "Host Battery Status"
         $scriptPath = $null
         $reportResult = "Pendiente" # Variable para guardar el resultado final
 
-        # 1. SELECCIONAR HOST OBJETIVO
         $targetHost = $hosts | Where-Object { $_.ConnectionState -eq "Connected" } | Select-Object -First 1
         $hostName = $targetHost.Name
-        
+
         if (-not $targetHost) {
             Write-Warning " -> No hay hosts conectados."
             # [REPORTE]
@@ -576,8 +573,7 @@ class Proactiva {
             }
             return
         }
-
-        # 2. OBTENER LA ALARMA FUENTE
+        # 2. OBTNER LA ALARMA FUENTE
         $sourceAlarm = Get-AlarmDefinition -Name $sourceAlarmName -Server $serverContext -ErrorAction SilentlyContinue | Select-Object -First 1
         if (-not $sourceAlarm) {
             Write-Warning " -> No se encontró alarma '$sourceAlarmName'."
@@ -587,7 +583,6 @@ class Proactiva {
             }
             return
         }
-
         # 3. EXTRAER RUTA DEL SCRIPT (Tu lógica original)
         try {
             $info = $sourceAlarm.ExtensionData.Info
@@ -596,12 +591,11 @@ class Proactiva {
                     $actualAction = $triggerAction.Action
                     if ($actualAction -is [VMware.Vim.RunScriptAction]) {
                         $scriptPath = $actualAction.Script
-                        break 
+                        break
                     }
                 }
             }
         } catch {}
-
         # Validación
         if ([string]::IsNullOrEmpty($scriptPath)) {
             Write-Warning " -> La alarma fuente existe pero no tiene script configurado."
@@ -611,7 +605,6 @@ class Proactiva {
             }
             return
         }
-
         # Debug Visual
         Write-Host " -> Script encontrado: '$scriptPath'" -ForegroundColor Cyan
 
@@ -625,7 +618,7 @@ class Proactiva {
             $spec = New-Object VMware.Vim.AlarmSpec
             $spec.Name = $alarmName
             $spec.Description = "DevOps Smoke Test"
-            $spec.Enabled = $true 
+            $spec.Enabled = $true
             $spec.Setting = New-Object VMware.Vim.AlarmSetting
             $spec.Setting.ToleranceRange = 0
             $spec.Setting.ReportingFrequency = 0
@@ -643,10 +636,9 @@ class Proactiva {
             # D. Acción
             $scriptAction = New-Object VMware.Vim.RunScriptAction
             $scriptAction.Script = $scriptPath
-
             $t1 = New-Object VMware.Vim.AlarmTriggeringActionTransitionSpec
             $t1.StartState = "green"; $t1.FinalState = "red"; $t1.Repeats = $false
-            
+           
             $triggerAction = New-Object VMware.Vim.AlarmTriggeringAction
             $triggerAction.Action = $scriptAction
             $triggerAction.TransitionSpecs = @($t1)
@@ -656,25 +648,25 @@ class Proactiva {
 
             # E. Crear en vCenter
             Write-Host "`t   -> Activando en $($targetHost.Name)..." -NoNewline
-            
-            
+           
             $alarmManager = Get-View AlarmManager -Server $serverContext
             $moref = $alarmManager.CreateAlarm($targetHost.ExtensionData.MoRef, $spec)
-            
+           
             Write-Host " DISPARADA." -ForegroundColor Green
-            
+
             # F. Esperar y Borrar
             Start-Sleep -Seconds 5
             $created = Get-View $moref -Server $serverContext
             $created.RemoveAlarm()
             Write-Host "`t   -> Alarma eliminada." -ForegroundColor Green
-            
             $reportResult = "SUCCESS"
+
         }
+
         catch {
             Write-Warning "`nError en prueba de alarma: $($_.Exception.Message)"
             $reportResult = "ERROR: $($_.Exception.Message)"
-            
+
             # Limpieza de emergencia
             $al = Get-AlarmDefinition -Name $alarmName -Entity $targetHost -Server $serverContext -ErrorAction SilentlyContinue
             if ($al) { Remove-AlarmDefinition $al -Server $serverContext -Confirm:$false }
@@ -687,6 +679,7 @@ class Proactiva {
             "Alarm Path"   = $scriptPath
             "Alarm Source" = $sourceAlarmName
             Result       = $reportResult
+            Timestamp       = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss")
         }
     }
     
