@@ -53,21 +53,13 @@ function Start-DatosProactivas($vcenters){
         }
         Write-Progress -Activity "Collection Complete" -Completed
 
-        Write-Host "`tGathering vCenter Appliance Info..."
-        $vcenter_short_name = ($vcenter.Name).Split('.')[0]
-        $vcenter_vm = $allVms | Where-Object { $_.Name -eq $vcenter.Name -or $_.Name -eq $vcenter_short_name }
-        
-        $vCenterData += [PSCustomObject]@{
-            "vCenter Server" = $vcenter.Name
-            "VM Name"        = if ($vcenter_vm) { $vcenter_vm.Name } else { "No Encontrada" }
-            "Version"        = $vcenter.Version
-            "Build"          = $vcenter.Build
-        }
-
         Write-Host "`tBatch collection finished. Processing reports..."
+        $proactiva.processAlarmCheck($hosts, $vcenter)
+        $proactiva.processBackupActivity()
+        $proactiva.processPerformanceHealth($clusters)
         $proactiva.processCertificates()
         $proactiva.processEsxi($hosts)
-        $proactiva.processVcenter($vCenterData) 
+        $proactiva.processVcenterHealthAndInfo($allVms, $vcenter) 
         #$proactiva.processNic($hosts, $vdswitches)
         $proactiva.processVm($allVms, $clusters) 
         $proactiva.processDatastore($hosts)

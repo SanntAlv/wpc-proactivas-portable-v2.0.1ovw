@@ -1,4 +1,5 @@
 $global:connections = @()
+$global:cisConnections = @{}
 
 function Set-Endpoints($modules) {
 	$components = @()
@@ -96,21 +97,34 @@ function Connect-Endpoints($modules) {
             Write-Host "`nProbando credenciales guardadas en '$serverName'..." -ForegroundColor Cyan
             foreach ($cachedCred in $credentialCache) {
                 try {
+                    # 1. Conectar a VIServer (SOAP)
                     $connection = Connect-VIServer -Server $serverName -Credential $cachedCred -ErrorAction Stop
-                    
-                    Write-Host "-> Conexión automática con '$serverName' exitosa." -ForegroundColor Green
+                    Write-Host "-> Conexión VIServer (SOAP) automática exitosa." -ForegroundColor Green
                     $successfulConnections += $connection
                     $connectedSuccessfully = $true
-                    break 
+                    
+                    # --- [NUEVA LÓGICA CIS] ---
+                    # 2. Si VIServer conectó, conectar a CisServer (REST)
+                    try {
+                        Write-Host "`t-> Intentando conexión CIS (REST) automática..."
+                        $cisConn = Connect-CisServer -Server $serverName -Credential $cachedCred -ErrorAction Stop
+                        $global:cisConnections[$serverName] = $cisConn # Guardamos en el llavero CIS
+                        Write-Host "`t-> Conexión CIS automática exitosa." -ForegroundColor Green
+                    } catch {
+                        Write-Warning "`t-> La conexión CIS automática falló. Los certificados internos no se podrán leer para $serverName."
+                    }
+                    # --- [FIN LÓGICA CIS] ---
+                    
+                    break # Salimos del bucle de credenciales
                 }
                 catch {
-                    # No hacemos nada, simplemente probamos la siguiente credencial de la cache.
+                    # Falló esta credencial, probamos la siguiente
                 }
             }
         }
 
         if ($connectedSuccessfully) {
-            continue
+            continue # Pasamos al siguiente servidor
         }
 
         while (-not $connectedSuccessfully) {
@@ -119,18 +133,28 @@ function Connect-Endpoints($modules) {
                 $credential = Get-Credential -Message "Ingrese credenciales para '$serverName'"
                 if (-not $credential) { throw "Operación cancelada por el usuario." }
                 
+                # 1. Conectar a VIServer (SOAP)
                 $connection = Connect-VIServer -Server $serverName -Credential $credential -ErrorAction Stop
-                
-                Write-Host "-> Conexión con '$serverName' exitosa." -ForegroundColor Green
+                Write-Host "-> Conexión VIServer (SOAP) con '$serverName' exitosa." -ForegroundColor Green
                 $successfulConnections += $connection
                 $connectedSuccessfully = $true 
-                
                 $credentialCache.Add($credential) | Out-Null
+                
+                # --- [NUEVA LÓGICA CIS] ---
+                # 2. Si VIServer conectó, conectar a CisServer (REST)
+                try {
+                    Write-Host "`t-> Intentando conexión CIS (REST)..."
+                    $cisConn = Connect-CisServer -Server $serverName -Credential $credential -ErrorAction Stop
+                    $global:cisConnections[$serverName] = $cisConn # Guardamos en el llavero CIS
+                    Write-Host "`t-> Conexión CIS exitosa." -ForegroundColor Green
+                } catch {
+                    Write-Warning "`t-> La conexión CIS falló. Los certificados internos no se podrán leer para $serverName."
+                }
+                # --- [FIN LÓGICA CIS] ---
             }
             catch {
-                Write-Warning "-> FALLO la conexión con '$serverName'."
+                Write-Warning "-> FALLO la conexión VIServer con '$serverName'."
                 Write-Warning "   Error: $($_.Exception.Message)"
-                
                 $choice = Read-Host "Presiona 'R' para reintentar la conexión con este servidor, o 'X' para abortar todo el proceso"
                 if ($choice.ToLower() -eq 'x') {
                     Write-Error "Operación abortada por el usuario."
@@ -166,11 +190,19 @@ function Connect-Endpoint($component){
 }
 
 function Disconnect-Endpoints {
-	foreach ($conn in $global:connections) {
-		if($conn.component -eq "vcenter"){
-			Disconnect-VIServer -Confirm
-		}
-		$conn.host = ""
-		$conn.conn = $null
-	} 
+    foreach ($conn in $global:connections) {
+        if($conn.component -eq "vcenter"){
+            # Desconecta VIServer (SOAP)
+            Disconnect-VIServer -Server $conn.conn -Confirm:$false -ErrorAction SilentlyContinue
+        }
+    }
+    
+    # --- [NUEVO] Desconecta todas las conexiones CIS (REST) ---
+    foreach ($cisConn in $global:cisConnections.Values) {
+        Disconnect-CisServer -Server $cisConn -Confirm:$false -ErrorAction SilentlyContinue
+    }
+
+    # Limpiamos las variables globales
+    $global:connections = @()
+    $global:cisConnections = @{}
 }
