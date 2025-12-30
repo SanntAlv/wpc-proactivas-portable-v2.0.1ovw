@@ -536,6 +536,7 @@ class Proactiva {
             }
             catch {
                 Write-Warning "Error al exportar backup del vDS '$($vds.Name)': $($_.Exception.Message)"
+                $fileName = "ERROR: $($_.Exception.Message)"
             }
 
             # 5. Lógica de reporte original

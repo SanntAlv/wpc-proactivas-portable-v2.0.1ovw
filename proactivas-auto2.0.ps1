@@ -1506,6 +1506,751 @@ function vss {
 
 }
 
+function vCenterRoot {
+    # 1. Importar datos de la hoja "vCenter"
+    $todosLosDatos = Get-ChildItem -Path $excelMasReciente -Filter *.xlsx | ForEach-Object {
+        Import-Excel -Path $_.FullName -WorksheetName "vCenter"
+    } | Where-Object { -not [string]::IsNullOrEmpty($_. "vCenter Server") }
+
+    # --- CONDICIÓN GLOBAL: SIN ACCESO (Hoja Vacía) ---
+    if (-not $todosLosDatos -or $todosLosDatos.Count -eq 0) {
+        return [PSCustomObject]@{
+            ID        = "VSP-TR-09"
+            Resultado = "Sin acceso"
+            Detalle   = "No se pudo recolectar información del VAMI o la hoja 'vCenter' está vacía."
+        }
+    }
+
+    $informeFinal = @()
+    $hoy = Get-Date
+    $fechaLimite6Meses = $hoy.AddMonths(6)
+    
+    # Banderas para el estado global (Solo lógica de fechas)
+    $hayVencidos = $false
+    $hayPorVencer = $false # < 6 meses
+
+    # 2. Procesar cada fila
+    foreach ($fila in $todosLosDatos) {
+        $fechaStr = $fila."Expiration Date"
+        $statusFinal = "Desconocido"
+        $esHallazgo = $false 
+
+        # --- Lógica de Negocio ---
+        if ($fechaStr -eq "Nunca") {
+            $statusFinal = "Resultado Esperado"
+        }
+        elseif ($fechaStr -eq "N/A" -or $fila.Status -like "*Error*" -or $fila.Status -like "*Unknown*") {
+            # Error puntual en esta fila, pero no es "Sin acceso" global
+            $statusFinal = "Error de lectura"
+            $esHallazgo = $true
+        }
+        else {
+            try {
+                $fechaVencimiento = Get-Date $fechaStr -ErrorAction Stop
+                
+                if ($fechaVencimiento -lt $hoy) {
+                    $statusFinal = "Vencido"
+                    $esHallazgo = $true
+                    $hayVencidos = $true
+                }
+                elseif ($fechaVencimiento -lt $fechaLimite6Meses) {
+                    $statusFinal = "Vencimiento < 6 meses"
+                    $esHallazgo = $true
+                    $hayPorVencer = $true
+                }
+                else {
+                    $statusFinal = "Resultado Esperado"
+                }
+            }
+            catch {
+                $statusFinal = "Error formato fecha"
+                $esHallazgo = $true
+            }
+        }
+
+        # 3. Si es un hallazgo, lo agregamos al informe detallado (Anexo)
+        if ($esHallazgo) {
+            $informeFinal += [PSCustomObject]@{
+                "vCenter"         = $fila."vCenter Server"
+                "Root User"       = $fila."Root User"
+                "Expiration Date" = $fechaStr
+                "Days Remaining"  = $fila."Days Remaining"
+                "Status Original" = $fila."Status"
+                "Evaluación"      = $statusFinal
+            }
+        }
+    }
+
+    # 4. Definir el Resultado Final del Checklist (Prioridad estricta)
+    $resultadoChecklist = "Resultado Esperado"
+    $detalleChecklist = "Las contraseñas de root no expiran o vencen en más de 6 meses."
+
+    if ($hayVencidos) {
+        $resultadoChecklist = "Vencido"
+        $detalleChecklist = "Se detectaron contraseñas de root ya expiradas."
+    }
+    elseif ($hayPorVencer) {
+        $resultadoChecklist = "Vencimiento < 6 meses"
+        $detalleChecklist = "Se detectaron contraseñas próximas a vencer (menos de 6 meses)."
+    }
+    # Nota: Si solo hubo "Error de lectura" en filas puntuales, el estado se mantiene en "Resultado Esperado" 
+    # (o podrías definir un estado intermedio si quisieras, pero según tu pedido, solo hay 3 estados válidos si hay datos).
+
+    # 5. Exportar al Anexo Técnico (Si corresponde)
+    if ($informeFinal.Count -gt 0) {
+        Exportar-InformeConEstilo -Datos $informeFinal `
+                                  -RutaArchivo $archivoSalida `
+                                  -NombreHoja "Vencimiento password de Root"
+    }
+
+    # 6. Retornar objeto para el Checklist
+    return [PSCustomObject]@{
+        ID        = "VSP-TR-09"
+        Resultado = $resultadoChecklist
+        Detalle   = $detalleChecklist
+    }
+}
+
+# la siguiente funcion debera tomar de la hoja de Certficate la columna de vCenter, Ubicacion, Subject, Valid from, Valid Until y Emisor
+# debera filtrar:
+#Resultados:
+#Si el vencimiento es igual o mayor a un año, el chequeo debe cerrarse con Resultado Esperado.
+#Si el vencimiento es igual o mayor a 6 meses, deberá marcarse como No Esperado y notificarse en el informe proactivo.
+#Si el vencimiento es menor a 6 meses, deberá generarse un ticket de soporte, tipo problema, prioridad planificado para dar seguimiento al caso.
+function vCenterCert {
+    # 1. Importar datos de la hoja "Certficate" (Nombre exacto solicitado)
+    $todosLosDatos = Get-ChildItem -Path $excelMasReciente -Filter *.xlsx | ForEach-Object {
+        Import-Excel -Path $_.FullName -WorksheetName "Certficate"
+    } | Where-Object { -not [string]::IsNullOrEmpty($_.vCenter) }
+
+    # Variables de control
+    $informeFinal = @()
+    $hoy = Get-Date
+    $fechaUnAnio = $hoy.AddYears(1)
+    
+    # Banderas para determinar el estado global
+    $hayVencidos = $false
+    $hayMenorUnAnio = $false
+    $hayErrores = $false
+
+    # 2. Verificar si hay datos (Caso "Sin acceso")
+    if (-not $todosLosDatos -or $todosLosDatos.Count -eq 0) {
+        return [PSCustomObject]@{
+            ID        = "VSP-SEC-02"
+            Resultado = "Sin acceso"
+            Detalle   = "No se pudo recolectar información de certificados o la hoja 'Certficate' está vacía."
+        }
+    }
+
+    # 3. Procesar cada fila
+    foreach ($fila in $todosLosDatos) {
+        $fechaStr = $fila."Valid Until"
+        $statusAnalisis = "Desconocido"
+        $esHallazgo = $false
+
+        if ([string]::IsNullOrEmpty($fechaStr) -or $fechaStr -eq "N/A") {
+            $statusAnalisis = "Error al obtener fecha"
+            $esHallazgo = $true
+            $hayErrores = $true
+        }
+        else {
+            try {
+                $fechaVencimiento = Get-Date $fechaStr -ErrorAction Stop
+                $diasRestantes = ($fechaVencimiento - $hoy).Days
+
+                if ($fechaVencimiento -lt $hoy) {
+                    # Ya expiró
+                    $statusAnalisis = "Vencido"
+                    $esHallazgo = $true
+                    $hayVencidos = $true
+                }
+                elseif ($fechaVencimiento -lt $fechaUnAnio) {
+                    # Vence en menos de 1 año (incluye los < 6 meses)
+                    $statusAnalisis = "Vencimiento < 1 Año"
+                    $esHallazgo = $true
+                    $hayMenorUnAnio = $true
+                }
+                else {
+                    # Vence en más de 1 año
+                    $statusAnalisis = "Resultado Esperado"
+                }
+            }
+            catch {
+                $statusAnalisis = "Error formato fecha"
+                $esHallazgo = $true
+                $hayErrores = $true
+            }
+        }
+
+        # Guardamos en el Anexo solo si no es el resultado ideal
+        if ($esHallazgo) {
+            $informeFinal += [PSCustomObject]@{
+                "vCenter"       = $fila.vCenter
+                "Ubicación"     = $fila.Ubicacion
+                "Subject"       = $fila.Subject
+                "Emisor"        = $fila.Emisor
+                "Valid From"    = $fila."Valid From"
+                "Valid Until"   = $fechaStr
+                "Días Restantes"= $diasRestantes
+            }
+        }
+    }
+
+    # 4. Definir el Resultado Final del Checklist (Prioridad de gravedad)
+    $resultadoChecklist = "Resultado Esperado"
+    $detalleChecklist = "Todos los certificados tienen vigencia mayor a 1 año."
+
+    if ($hayVencidos) {
+        $resultadoChecklist = "Vencido"
+        $detalleChecklist = "Se detectaron certificados expirados."
+    }
+    elseif ($hayErrores) {
+        # Si no hay vencidos pero hubo errores de lectura, es una alerta
+        $resultadoChecklist = "Sin acceso" 
+        $detalleChecklist = "Hubo errores al leer las fechas de algunos certificados."
+    }
+    elseif ($hayMenorUnAnio) {
+        $resultadoChecklist = "Vencimiento < 1 Año"
+        $detalleChecklist = "Se detectaron certificados próximos a vencer (menos de 1 año)."
+    }
+
+    # 5. Exportar al Anexo Técnico (Si corresponde)
+    if ($informeFinal.Count -gt 0) {
+        Exportar-InformeConEstilo -Datos $informeFinal `
+                                  -RutaArchivo $archivoSalida `
+                                  -NombreHoja "Certificados vCenter"
+    }
+
+    # 6. Retorno para el Checklist
+    return [PSCustomObject]@{
+        ID        = "VSP-TR-07"
+        Resultado = $resultadoChecklist
+        Detalle   = $detalleChecklist
+    }
+}
+
+function esxiCert {
+    # 1. Importar datos de la hoja "ESXi"
+    $todosLosDatos = Get-ChildItem -Path $excelMasReciente -Filter *.xlsx | ForEach-Object {
+        Import-Excel -Path $_.FullName -WorksheetName "ESXi"
+    } | Where-Object { -not [string]::IsNullOrEmpty($_.vCenter) }
+
+    if (-not $todosLosDatos -or $todosLosDatos.Count -eq 0) {
+        return [PSCustomObject]@{
+            ID        = "VSP-SEC-03" 
+            Resultado = "Sin acceso"
+            Detalle   = "No se pudo recolectar información de los Hosts ESXi o la hoja está vacía."
+        }
+    }
+
+    $informeFinal = @()
+    $hoy = Get-Date
+    $fechaUnAnio = $hoy.AddYears(1)
+    
+    # Contadores y acumuladores para el resumen
+    $countVencidos = 0
+    $countMenorUnAnio = 0
+    $fechaMasProxima = $null # Para guardar la fecha más cercana a vencer
+
+    # 2. Procesar cada fila
+    foreach ($fila in $todosLosDatos) {
+        $fechaStr = $fila."Cert Valid To"
+        $statusAnalisis = "Desconocido"
+        $esHallazgo = $false
+
+        if ([string]::IsNullOrEmpty($fechaStr) -or $fechaStr -eq "N/A") {
+            $statusAnalisis = "Error de lectura"
+            $esHallazgo = $true
+        }
+        else {
+            try {
+                $fechaVencimiento = Get-Date $fechaStr -ErrorAction Stop
+                
+                if ($fechaVencimiento -lt $hoy) {
+                    $statusAnalisis = "Vencido"
+                    $esHallazgo = $true
+                    $countVencidos++
+                }
+                elseif ($fechaVencimiento -lt $fechaUnAnio) {
+                    $statusAnalisis = "Vencimiento < 1 Año"
+                    $esHallazgo = $true
+                    $countMenorUnAnio++
+                    
+                    # Logica para encontrar la fecha más próxima
+                    if ($null -eq $fechaMasProxima -or $fechaVencimiento -lt $fechaMasProxima) {
+                        $fechaMasProxima = $fechaVencimiento
+                    }
+                }
+                else {
+                    $statusAnalisis = "Resultado Esperado"
+                }
+            }
+            catch {
+                $statusAnalisis = "Error formato fecha"
+                $esHallazgo = $true
+            }
+        }
+
+        if ($esHallazgo) {
+            $informeFinal += [PSCustomObject]@{
+                "vCenter"       = $fila.vCenter
+                "Hostname"      = $fila.Hostname
+                "Cert Valid To" = $fechaStr
+                "Cert Issuer"   = $fila."Cert Issuer"
+            }
+        }
+    }
+
+    # 4. Definir el Resultado Final y Detalle Rico
+    $resultadoChecklist = "Resultado Esperado"
+    $detalleChecklist = "Todos los certificados de host tienen vigencia mayor a 1 año."
+
+    if ($countVencidos -gt 0) {
+        $resultadoChecklist = "Vencido"
+        # Detalle específico: Cantidad de vencidos
+        $detalleChecklist = "Se detectaron $countVencidos certificados de host ESXi ya expirados."
+    }
+    elseif ($countMenorUnAnio -gt 0) {
+        $resultadoChecklist = "Vencimiento < 1 Año"
+        
+        # Formateamos la fecha más próxima para que se vea bien
+        $fechaProximaStr = if ($fechaMasProxima) { $fechaMasProxima.ToString("yyyy-MM-dd") } else { "N/A" }
+        
+        # Detalle específico: Cantidad y fecha más próxima
+        $detalleChecklist = "Se detectaron $countMenorUnAnio certificados próximos a vencer. El más próximo vence el $fechaProximaStr."
+    }
+
+    # 5. Exportar al Anexo Técnico
+    if ($informeFinal.Count -gt 0) {
+        Exportar-InformeConEstilo -Datos $informeFinal `
+                                  -RutaArchivo $archivoSalida `
+                                  -NombreHoja "Certificados ESXi"
+    }
+
+    # 6. Retornar objeto para el Checklist
+    return [PSCustomObject]@{
+        ID        = "VSP-TR-08" 
+        Resultado = $resultadoChecklist
+        Detalle   = $detalleChecklist
+    }
+}
+
+
+function performanceHealthCheck {
+    # 1. Importar datos de la hoja "PerformanceHealth"
+    $todosLosDatos = Get-ChildItem -Path $excelMasReciente -Filter *.xlsx | ForEach-Object {
+        Import-Excel -Path $_.FullName -WorksheetName "PerformanceHealth"
+    } | Where-Object { -not [string]::IsNullOrEmpty($_.vCenter) }
+
+    # --- CONDICIÓN GLOBAL: SIN DATOS ---
+    if (-not $todosLosDatos -or $todosLosDatos.Count -eq 0) {
+        return [PSCustomObject]@{
+            ID        = "VSP-MON-01" # Ajustar ID
+            Resultado = "Sin acceso"
+            Detalle   = "No se pudo recolectar información de salud de performance o la hoja está vacía."
+        }
+    }
+
+    $informeFinal = @()
+    $hayProblemas = $false
+    $clustersAfectados = 0
+
+    # 2. Procesar cada fila (cada Cluster)
+    foreach ($fila in $todosLosDatos) {
+        $esHallazgo = $false
+        $motivoFallo = @()
+
+        # Verificamos cada columna crítica
+        if ($fila."Health DB" -ne "OK") {
+            $esHallazgo = $true
+            $motivoFallo += "Fallo DB General"
+        }
+        if ($fila."CPU Stats" -ne "OK") {
+            $esHallazgo = $true
+            $motivoFallo += "Falta CPU"
+        }
+        if ($fila."Mem Stats" -ne "OK") {
+            $esHallazgo = $true
+            $motivoFallo += "Falta Memoria"
+        }
+        if ($fila."Net Stats" -ne "OK") {
+            $esHallazgo = $true
+            $motivoFallo += "Falta Red"
+        }
+        if ($fila."Disk Stats" -ne "OK") {
+            $esHallazgo = $true
+            $motivoFallo += "Falta Disco"
+        }
+
+        # 3. Si hay problemas, guardamos para el reporte detallado
+        if ($esHallazgo) {
+            $hayProblemas = $true
+            $clustersAfectados++
+            
+            $informeFinal += [PSCustomObject]@{
+                "vCenter"     = $fila.vCenter
+                "Cluster"     = $fila.Cluster
+                "Estado DB"   = $fila."Health DB"
+                "CPU"         = $fila."CPU Stats"
+                "Memoria"     = $fila."Mem Stats"
+                "Red"         = $fila."Net Stats"
+                "Disco"       = $fila."Disk Stats"
+            }
+        }
+    }
+
+    # 4. Definir el Resultado Final del Checklist
+    $resultadoChecklist = "Resultado Esperado"
+    $detalleChecklist = "Todos los clústeres están recolectando y almacenando métricas de rendimiento correctamente."
+
+    if ($hayProblemas) {
+        $resultadoChecklist = "No recomendado"
+        $detalleChecklist = "Se detectaron $clustersAfectados clústeres con problemas en la recolección de estadísticas."
+    }
+
+    # 5. Exportar al Anexo Técnico (Si corresponde)
+    if ($informeFinal.Count -gt 0) {
+        Exportar-InformeConEstilo -Datos $informeFinal `
+                                  -RutaArchivo $archivoSalida `
+                                  -NombreHoja "Salud Performance"
+    }
+
+    # 6. Retornar objeto para el Checklist
+    return [PSCustomObject]@{
+        ID        = "VSP-TR-10" 
+        Resultado = $resultadoChecklist
+        Detalle   = $detalleChecklist
+    }
+}
+
+function alarmCheck {
+    # 1. Importar datos
+    $todosLosDatos = Get-ChildItem -Path $excelMasReciente -Filter *.xlsx | ForEach-Object {
+        Import-Excel -Path $_.FullName -WorksheetName "Falso Positivo"
+    } | Where-Object { -not [string]::IsNullOrEmpty($_.vCenter) }
+
+    # --- CONDICIÓN GLOBAL: SIN ACCESO ---
+    if (-not $todosLosDatos -or $todosLosDatos.Count -eq 0) {
+        return [PSCustomObject]@{
+            ID        = "VSP-MON-02" 
+            Resultado = "Sin acceso"
+            Detalle   = "No se encontraron registros de la prueba de alarmas (hoja vacía)."
+        }
+    }
+
+    $informeFinal = @()
+    $countExitos = 0
+    $countFallas = 0
+    
+    # Lista para acumular las causas raíces de los fallos (sin repetir)
+    $diagnosticos = @()
+
+    # 2. Procesar cada fila
+    foreach ($fila in $todosLosDatos) {
+        $resultadoPrueba = $fila.Result
+        $esHallazgo = $false
+        $diagnosticoFila = ""
+
+        if ($resultadoPrueba -eq "SUCCESS") {
+            $countExitos++
+        }
+        else {
+            $countFallas++
+            $esHallazgo = $true
+            
+            # --- INTELIGENCIA DE DIAGNÓSTICO ---
+            # Analizamos el texto del error para dar una causa probable
+            switch -Wildcard ($resultadoPrueba) {
+                "*No hay hosts conectados*" {
+                    $diagnosticoFila = "Imposible ejecutar: El vCenter no tiene hosts conectados/operativos."
+                }
+                "*No se encontró*alarma fuente*" {
+                    $diagnosticoFila = "Configuración incompleta: No existe la alarma 'Host Battery Status' para copiar."
+                }
+                "*no tiene script configurado*" {
+                    $diagnosticoFila = "Configuración incompleta: La alarma 'Host Battery Status' existe pero no tiene un script asignado."
+                }
+                "*spec*" {
+                    $diagnosticoFila = "Error API: Fallo interno al construir el objeto de alarma (posible incompatibilidad de versión)."
+                }
+                "*Permission*" {
+                    $diagnosticoFila = "Permisos: La cuenta de servicio no tiene privilegios para crear/borrar alarmas."
+                }
+                Default {
+                    # Si es otro error técnico, lo mostramos tal cual pero resumido
+                    $diagnosticoFila = "Error Técnico: $resultadoPrueba"
+                }
+            }
+
+            # Agregamos el diagnóstico a la lista global de causas (para el checklist)
+            if ($diagnosticos -notcontains $diagnosticoFila) {
+                $diagnosticos += $diagnosticoFila
+            }
+        }
+
+        # 3. Guardar hallazgo en Anexo Técnico
+        if ($esHallazgo) {
+            $informeFinal += [PSCustomObject]@{
+                "vCenter"       = $fila.vCenter
+                "Host"          = $fila.Host
+                "Path Alarma"   = $fila."Alarm Path"
+                "Alarma Fuente" = $fila."Alarm Source"
+                "Resultado"     = $resultadoPrueba
+                "Timestamp"     = $fila.Timestamp
+            }
+        }
+    }
+
+    # 4. Definir el Resultado Final del Checklist
+    $resultadoChecklist = "Resultado Esperado"
+    $detalleChecklist = "VERIFICAR EN JIRA. La prueba de falso positivo se ejecutó correctamente en todos los vCenters ($countExitos pruebas exitosas)."
+
+    if ($countFallas -gt 0) {
+        $resultadoChecklist = "No recomendado"
+        
+        # Construimos un mensaje inteligente uniendo los diagnósticos únicos
+        $causasTexto = $diagnosticos -join "; "
+        $detalleChecklist = "Falló la prueba en $countFallas vCenter(s). Causas detectadas: $causasTexto"
+    }
+
+    # 5. Exportar al Anexo Técnico
+    if ($informeFinal.Count -gt 0) {
+        Exportar-InformeConEstilo -Datos $informeFinal `
+                                  -RutaArchivo $archivoSalida `
+                                  -NombreHoja "Falso Positivo"
+    }
+
+    # 6. Retornar objeto para el Checklist
+    return [PSCustomObject]@{
+        ID        = "VSP-ME-13" 
+        Resultado = $resultadoChecklist
+        Detalle   = $detalleChecklist
+    }
+}
+
+
+function backupCheck {
+    # 1. Importar datos
+    $todosLosDatos = Get-ChildItem -Path $excelMasReciente -Filter *.xlsx | ForEach-Object {
+        Import-Excel -Path $_.FullName -WorksheetName "BackupActivity"
+    } | Where-Object { -not [string]::IsNullOrEmpty($_.vCenter) }
+
+    # Condición Global: Sin Datos
+    if (-not $todosLosDatos -or $todosLosDatos.Count -eq 0) {
+        return [PSCustomObject]@{
+            ID        = "VSP-SE-02" 
+            Resultado = "Sin acceso"
+            Detalle   = "No se encontraron registros de actividad de backup."
+        }
+    }
+
+    $informeFinal = @()
+    
+    # Banderas Globales para Checklist
+    $hayFallidos = $false
+    $hayManuales = $false
+    $hayHuecos = $false
+    $vcentersConProblemas = @()
+
+    # 2. Agrupar por vCenter
+    $gruposVcenter = $todosLosDatos | Group-Object vCenter
+
+    foreach ($grupo in $gruposVcenter) {
+        $nombreVcenter = $grupo.Name
+        # Ordenamos descendente: índice 0 es el más reciente
+        $backups = $grupo.Group | Sort-Object StartTime -Descending 
+        
+        $vcenterTieneProblemas = $false
+        $mensajeProblema = ""
+
+        # --- A. ANÁLISIS DE INTEGRIDAD Y ESTADO ---
+        # Primero revisamos si hay fallos o manuales para levantar la bandera
+        foreach ($b in $backups) {
+            if ($b.Status -ne "SUCCEEDED") { $vcenterTieneProblemas = $true; $hayFallidos = $true }
+            if ($b.Type -ne "SCHEDULED")   { $vcenterTieneProblemas = $true; $hayManuales = $true }
+        }
+
+        # --- B. ANÁLISIS DE FRECUENCIA (SECUENCIAL) ---
+        $fechasParseadas = @()
+        
+        # 1. Parsear todas las fechas primero
+        foreach ($b in $backups) {
+            $fechaObj = $null
+            try { 
+                if ($b.StartTime -and $b.StartTime -ne "N/A") { 
+                    $fechaObj = Get-Date $b.StartTime -ErrorAction Stop
+                }
+            } catch {}
+            
+            # Guardamos un objeto custom con la data original y la fecha parseada
+            $fechasParseadas += [PSCustomObject]@{
+                Original = $b
+                DateObj  = $fechaObj
+                Note     = "" # Para anotar saltos
+            }
+        }
+
+        # 2. Verificar Hueco Inicial (Hoy vs Último Backup)
+        $hoy = Get-Date
+        if ($fechasParseadas.Count -gt 0 -and $fechasParseadas[0].DateObj) {
+            $diffHoy = ($hoy - $fechasParseadas[0].DateObj).TotalHours
+            if ($diffHoy -gt 26) {
+                $vcenterTieneProblemas = $true
+                $hayHuecos = $true
+                $fechasParseadas[0].Note = "Salto > 24h desde hoy ($([math]::Round($diffHoy))hs)"
+            }
+        } else {
+             # Si no hay fechas válidas en absoluto
+             $vcenterTieneProblemas = $true
+        }
+
+        # 3. Verificar Huecos entre Backups (N vs N+1)
+        for ($i = 0; $i -lt ($fechasParseadas.Count - 1); $i++) {
+            $actual = $fechasParseadas[$i]
+            $siguiente = $fechasParseadas[$i+1]
+
+            if ($actual.DateObj -and $siguiente.DateObj) {
+                $diffHoras = ($actual.DateObj - $siguiente.DateObj).TotalHours
+                
+                # Si la diferencia es mayor a 26 horas, hay un día faltante entre medio
+                if ($diffHoras -gt 26) {
+                    $vcenterTieneProblemas = $true
+                    $hayHuecos = $true
+                    # Marcamos el registro más antiguo del par para indicar que después de ese hubo un hueco
+                    $siguiente.Note = "Salto > 24h hasta el siguiente backup ($([math]::Round($diffHoras))hs)"
+                }
+            }
+        }
+
+        # --- C. REPORTE (Si hay CUALQUIER problema, volcamos TODO el historial) ---
+        if ($vcenterTieneProblemas) {
+            if ($nombreVcenter -notin $vcentersConProblemas) { $vcentersConProblemas += $nombreVcenter }
+
+            foreach ($item in $fechasParseadas) {
+                $fila = $item.Original
+                $notaFrecuencia = $item.Note
+                
+                # Determinamos la evaluación de esta fila específica
+                $eval = "OK"
+                if ($fila.Status -ne "SUCCEEDED") { $eval = "Estado Incorrecto ($($fila.Status))" }
+                elseif ($fila.Type -ne "SCHEDULED") { $eval = "Tipo Incorrecto ($($fila.Type))" }
+                elseif ($notaFrecuencia) { $eval = "Error Frecuencia: $notaFrecuencia" }
+                else { $eval = "OK (Contexto)" } # Fila sana pero reportada por contexto
+
+                $informeFinal += [PSCustomObject]@{
+                    "vCenter"       = $nombreVcenter
+                    "JobId"         = $fila.JobId
+                    "Type"          = $fila.Type
+                    "Status"        = $fila.Status
+                    "StartTime"     = $fila.StartTime
+                    "Location"      = $fila.Location
+                    "Evaluación"    = $eval
+                }
+            }
+        }
+    }
+
+    # 4. Definir Resultado Checklist
+    $resultadoChecklist = "Resultado Esperado"
+    $detalleChecklist = "Los backups se ejecutan diariamente, son programados y finalizan exitosamente."
+    
+    $problemasTxt = @()
+    if ($hayFallidos) { $problemasTxt += "fallos de ejecución" }
+    if ($hayManuales) { $problemasTxt += "ejecuciones manuales" }
+    if ($hayHuecos)   { $problemasTxt += "interrupciones en la frecuencia diaria" }
+
+    if ($problemasTxt.Count -gt 0) {
+        $resultadoChecklist = "No recomendado"
+        $detalleChecklist = "Se detectaron: " + ($problemasTxt -join ", ") + ". Afecta a: " + ($vcentersConProblemas -join ", ")
+    }
+
+    # 5. Exportar al Anexo
+    if ($informeFinal.Count -gt 0) {
+        Exportar-InformeConEstilo -Datos $informeFinal `
+                                  -RutaArchivo $archivoSalida `
+                                  -NombreHoja "Backup VAMI"
+    }
+
+    return [PSCustomObject]@{
+        ID        = "VSP-SE-02" 
+        Resultado = $resultadoChecklist
+        Detalle   = $detalleChecklist
+    }
+}
+
+function vdsBackupCheck {
+    # 1. Importar datos de la hoja "Distributed Switch"
+    # (Asegúrate que este sea el nombre de la hoja generado por tu script de exportación)
+    $todosLosDatos = Get-ChildItem -Path $excelMasReciente -Filter *.xlsx | ForEach-Object {
+        Import-Excel -Path $_.FullName -WorksheetName "vDS"
+    } | Where-Object { -not [string]::IsNullOrEmpty($_.vCenter) }
+
+    # Ruta fija solicitada para el mensaje de éxito
+    $rutaBackups = "...\devops-powershell\reportes\vds_configuration"
+
+    # --- CASO 1: HOJA VACÍA (NO HAY vDS) ---
+    if (-not $todosLosDatos -or $todosLosDatos.Count -eq 0) {
+        return [PSCustomObject]@{
+            ID        = "VSP-SE-01" 
+            Resultado = "Resultado Esperado"
+            Detalle   = "No se detectaron Distributed Switches (vDS) en la infraestructura para respaldar."
+        }
+    }
+
+    $informeFinal = @()
+    $vdsAfectados = 0
+    $erroresUnicos = @()
+
+    # 2. Procesar cada fila
+    foreach ($fila in $todosLosDatos) {
+        $backupStatus = $fila."Backup File"
+        
+        # Buscamos si la celda del archivo contiene el texto de error que definimos antes
+        if ($backupStatus -like "ERROR*") {
+            $vdsAfectados++
+            $mensajeError = $backupStatus -replace "ERROR: ", "" # Limpiamos para el reporte
+            
+            if ($mensajeError -notin $erroresUnicos) {
+                $erroresUnicos += $mensajeError
+            }
+
+            # Agregamos al Anexo Técnico
+            $informeFinal += [PSCustomObject]@{
+                "vCenter"  = $fila.vCenter
+                "vDS Name" = $fila.Name
+                "Estado"   = "Fallo de Backup"
+                "Detalle"  = $mensajeError
+            }
+        }
+    }
+
+    # 3. Definir Resultado del Checklist
+    if ($vdsAfectados -gt 0) {
+        $resultadoChecklist = "No recomendado"
+        
+        # Construimos un resumen de los errores
+        $resumenErrores = if ($erroresUnicos.Count -gt 1) { "Múltiples errores (ver anexo)" } else { $erroresUnicos[0] }
+        $detalleChecklist = "Falló el backup de $vdsAfectados vDS. Error: $resumenErrores"
+        
+        # 4. Exportar al Anexo (Solo si hubo fallos)
+        Exportar-InformeConEstilo -Datos $informeFinal `
+                                  -RutaArchivo $archivoSalida `
+                                  -NombreHoja "Backup vDS"
+    }
+    else {
+        # Caso Éxito Total
+        $resultadoChecklist = "Resultado Esperado"
+        $detalleChecklist = "Se realizaron los backups correctamente. Chequear path: $rutaBackups"
+    }
+
+    # 5. Retornar objeto para el Checklist
+    return [PSCustomObject]@{
+        ID        = "VSP-SE-01" 
+        Resultado = $resultadoChecklist
+        Detalle   = $detalleChecklist
+    }
+}
+
 
 
 function EjecutarYActualizarChecklist {
@@ -1557,18 +2302,22 @@ $tareasAejecutar = [System.Collections.Generic.List[scriptblock]]::new()
     { AnalizarSize }, { Particiones }, { SyslogCheck }, { Multipath },
     { ConsVer }, { ConsRec }, { PlacaRed }, { TSMCheck },
     { pManagement }, { vmtools }, { isos }, { placasDeRed },
-    { snapshotsCheck }
+    { snapshotsCheck }, { alarmCheck}
 )
 [scriptblock[]]$tareasTrimestrales = @(
     { endOfSupport }, { compatComponentes }, { ntpCheck }, { Drivers },
-    { DNSConfig }, { Licencia }, { NIOC }, { vss }
+    { DNSConfig }, { Licencia }, { NIOC }, { vss }, { vCenterRoot}, 
+    { vCenterCert }, { esxiCert }, { performanceHealthCheck }, { vdsBackupCheck }
+)
+[scriptblock[]]$tareasSemestrales = @(
+    { backupCheck }, { vdsBackupCheck }
 )
 
 foreach ($tarea in $tareasSeleccionadas) {
     switch ($tarea.Trim()) {
         '1' { $tareasAejecutar.AddRange($tareasMensuales) }
         '2' { $tareasAejecutar.AddRange($tareasTrimestrales) }
-        '3' { Write-Host "Esta tarea se realiza manualmente, leer documentacion: How to Proactivas" }
+        '3' { $tareasAejecutar.AddRange($tareasSemestrales) }
         '4' { Write-Host "Saliendo del script."; exit }
         default { Write-Host "Opcion no válida: '$($tarea.Trim())'" }
     }
