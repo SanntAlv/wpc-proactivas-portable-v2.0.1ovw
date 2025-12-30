@@ -660,7 +660,7 @@ function TSMCheck {
         $resultadoChecklist = "No recomendado"
         $detalleChecklist = "Se encontraron hosts con timeout de TSM configurado en 0 segundos"
     } elseif ($encontroFueraDeRango) {
-        $resultadoChecklist = "Fuera del valor recomendado"
+        $resultadoChecklist = "Fuera de valor recomendado"
         $detalleChecklist = "Se encontraron hosts con timeout de TSM configurado fuera del rango recomendado (300-1800s)"
     }
 
