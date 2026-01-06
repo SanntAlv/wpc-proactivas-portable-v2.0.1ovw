@@ -1,8 +1,10 @@
 @echo off
-
 setlocal
 set "BASE_DIR=%~dp0"
 
+:: --------------------------------------------------------------------------------
+:: PASO 1: Recolección
+:: --------------------------------------------------------------------------------
 set "RESULT_FILE=%BASE_DIR%resultado.txt"
 IF EXIST "%RESULT_FILE%" (
     echo Limpiando archivo de resultado anterior...
@@ -15,12 +17,16 @@ echo.
 
 call "%BASE_DIR%run.bat"
 
+:: Aquí usamos la sintaxis antigua pero segura para comprobar si run.bat falló
 IF ERRORLEVEL 1 (
     echo.
     echo El usuario cancelo la operacion. El flujo de trabajo se ha detenido.
     GOTO :end_script
 )
 
+:: --------------------------------------------------------------------------------
+:: PASO 2: Conversión a Excel
+:: --------------------------------------------------------------------------------
 echo.
 echo [PASO 2 de 3] - Recoleccion finalizada. Ejecutando la conversion a Excel...
 echo (Se abrira una nueva ventana para este paso)
@@ -34,17 +40,28 @@ IF NOT EXIST "%RESULT_FILE%" (
     GOTO :end_script
 )
 
+:: --------------------------------------------------------------------------------
+:: PASO 3: Validación y Checklist (MÉTODO BLINDADO)
+:: --------------------------------------------------------------------------------
 echo.
+echo Buscando trigger "_Proactiva" en: "%RESULT_FILE%"
 
-:: Buscamos la palabra "_Proactiva" DENTRO del archivo resultado.txt
-echo "%RESULT_FILE%" | findstr /I "_Proactiva" >nul
+:: EXPLICACIÓN TÉCNICA:
+:: findstr devuelve "Exit Code 0" si encuentra el texto, y "1" si no.
+:: El operador '&&' ejecuta el bloque siguiente SOLO si el comando anterior dio 0 (éxito).
+:: El operador '||' ejecuta el bloque siguiente SOLO si el comando anterior dio 1 (fallo).
+:: Esto evita leer la variable %ERRORLEVEL% que podría estar sucia.
 
-:: Si findstr la encontró (ERRORLEVEL 0), ejecutamos el paso 3.
-IF %ERRORLEVEL% == 0 (
-    echo [PASO 3 de 3] - Reporte completo de Proactiva detectado. Ejecutando el filtrado y generando el Anexo...
-    echo (Se abrira una nueva ventana para este paso)
+findstr /M /I /C:"_Proactiva" "%RESULT_FILE%" >nul && (
+    echo.
+    echo [PASO 3 de 3] - REPORTE PROACTIVA DETECTADO.
+    echo Ejecutando generacion de Anexo y Checklist...
     echo.
     start "Paso 3: Generando Anexo" /wait pwsh.exe -ExecutionPolicy Bypass -File "%BASE_DIR%proactivas-auto2.0.ps1" 2>nul
+) || (
+    echo.
+    echo [INFO] No se encontro la marca "_Proactiva" en el resultado.
+    echo Se omite la generacion del Anexo tecnico y Checklist.
 )
 
 :end_script
