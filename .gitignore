@@ -1,0 +1,11 @@
+*.log
+*.txt
+*.zip
+*.json
+
+devops-powershell/reportes/vds_configuration/
+devops-powershell/reportes/Anexo/
+devops-powershell/reportes/proactiva-excel/
+
+/resultado.txt
+
