@@ -557,7 +557,7 @@ class Proactiva {
         Write-Host "`tProcessing Alarm Check (Extraction & Test)..." -NoNewline
         $serverContext = $this.currentVCenter
         $vcenterName = $vcenterConnection.Name
-
+        
         $alarmName = "Falso Positivo $($serverContext.Name)"
         $sourceAlarmName = "Host Battery Status"
         $scriptPath = $null
@@ -687,69 +687,74 @@ class Proactiva {
     processVcenterHealthAndInfo($allVms, $vcenterConnection) {
         Write-Host "`tProcessing vCenter General & Health Info..." -NoNewline
         
-        # --- PARTE 1: Datos Generales (VIServer) ---
-        # Usamos el objeto de conexión que pasaste por parámetro
+        # --- PARTE 1: Datos Generales ---
         $vcenterName = $vcenterConnection.Name
         $version     = $vcenterConnection.Version
         $build       = $vcenterConnection.Build
         
-        # Buscamos la VM del vCenter
         $vcenterShortName = ($vcenterName).Split('.')[0]
         $vcenterVmObj = $allVms | Where-Object { $_.Name -eq $vcenterName -or $_.Name -eq $vcenterShortName } | Select-Object -First 1
         $vmName = if ($vcenterVmObj) { $vcenterVmObj.Name } else { "No Encontrada (Físico/Otro)" }
 
-        # --- PARTE 2: Datos de Root Password (CIS API) ---
+        # --- PARTE 2: Datos Root (CIS) ---
         $rootUser = "root"
         $expirationDate = "N/A"
         $daysRemaining = "N/A"
-        $rootStatus = "Unknown (No CIS)"
+        $rootStatus = "Unknown"
 
         Import-Module VMware.VimAutomation.Cis.Core -ErrorAction SilentlyContinue
 
-        # Importante: Usamos el llavero global para asegurar que consultamos al vCenter correcto
-        # Si no usamos -CisServer, Get-CisService podría responder desde cualquier conexión abierta.
-        #lo comentado arriba puede ser una mejora a futuro, sin embargo esta probado la consistencia de estas llamadas a la api sin pasar por parametro -CisServer
         try {
-            $accountService = Get-CisService -Name "com.vmware.appliance.local_accounts" | Select-Object -First 1
+            # Obtenemos el servicio de cuentas locales
+            $accountService = Get-CisService -Name "com.vmware.appliance.local_accounts" -ErrorAction Stop | Select-Object -First 1
             
             if ($accountService) {
                 $rootInfo = $accountService.get("root")
                 $hoy = Get-Date
-                if ($rootInfo.password_expires) {
+
+                # LÓGICA CORREGIDA: Verificamos si existe el dato de la fecha directamente
+                if ($rootInfo.password_expires_at) {
                     $expirationDateObj = Get-Date $rootInfo.password_expires_at
                     $expirationDate = $expirationDateObj.ToString("yyyy-MM-dd HH:mm")
+                    
                     $diasRestantes = ($expirationDateObj - $hoy).Days
                     $daysRemaining = $diasRestantes
+                    
+                    # Definición de Estado
                     if ($diasRestantes -lt 0) { $rootStatus = "Expirada" }
                     elseif ($diasRestantes -lt 30) { $rootStatus = "Expira Pronto (Crítico)" }
                     else { $rootStatus = "Válida" }
                 }
                 else {
+                    # Si el campo fecha viene vacío, es que no expira
                     $expirationDate = "Nunca"
                     $rootStatus = "Válida (Sin expiración)"
                 }
             }
+            else {
+                $rootStatus = "Error: Servicio LocalAccounts no disponible"
+            }
         }
         catch {
+            # Captura de error silenciosa pero efectiva para el reporte
             $rootStatus = "Error API: $($_.Exception.Message)"
         }
-        
 
-        # --- PARTE 3: Consolidación en el Reporte ---
+        # --- PARTE 3: Reporte ---
         $this.vCenterReport += [PSCustomObject]@{
             "vCenter Server"  = $vcenterName
             "VM Name"         = $vmName
-            "Version"         = $version   # Usamos las variables locales capturadas arriba
-            "Build"           = $build     # Usamos las variables locales capturadas arriba
+            "Version"         = $version
+            "Build"           = $build
             "Root User"       = $rootUser
             "Expiration Date" = $expirationDate
             "Days Remaining"  = $daysRemaining
-            "Status"          = $rootStatus
+            "Data Status"     = $rootStatus
         }
         
         Write-Host " -> OK." -ForegroundColor Green
     }
-
+    
     processCertificates() {
         Write-Host "`tProcessing Certificates (API Method)..." -NoNewline
         
