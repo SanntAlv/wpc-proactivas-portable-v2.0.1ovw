@@ -558,7 +558,8 @@ class Proactiva {
         $serverContext = $this.currentVCenter
         $vcenterName = $vcenterConnection.Name
         
-        $alarmName = "Falso Positivo $($serverContext.Name)"
+        $uniqueId = (Get-Date).ToString("yyyyMMdd_HHmmss")
+        $alarmName = "Falso Positivo $($serverContext.Name) $uniqueId "
         $sourceAlarmName = "Host Battery Status"
         $scriptPath = $null
         $reportResult = "Pendiente" # Variable para guardar el resultado final
