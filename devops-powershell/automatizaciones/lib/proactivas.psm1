@@ -509,7 +509,6 @@ class Proactiva {
     processvDS($vdswitches) {
         Write-Host "`tProcessing vDS (and Backup)..." -NoNewline;
         
-        # 1. Definimos la ruta de la carpeta de backups
         $backupPath = Join-Path -Path $global:CONFIG.REPORTS_FOLDER -ChildPath "vds_configuration"
 
         # 2. Verificamos si existe. Si no, la creamos.
@@ -999,7 +998,7 @@ class Proactiva {
                     $jobsMap = $detailsService.list($null)
                     
                     if ($jobsMap) {
-                        # [CORRECCIÓN] Recorremos el diccionario para preservar el ID
+                        # Recorremos el diccionario para preservar el ID
                         foreach ($entry in $jobsMap.GetEnumerator()) {
                             $jobObj = $entry.Value
                             $jobIdKey = $entry.Key
@@ -1028,7 +1027,6 @@ class Proactiva {
                     $jobIds = $simpleService.list()
                     
                     # 2. Ordenamos los IDs (que tienen fecha) para procesar solo los últimos 7
-                    # Esto optimiza la velocidad evitando hacer .get() de 300 trabajos viejos
                     $latestIds = $jobIds | Sort-Object -Descending | Select-Object -First 7
 
                     foreach ($jid in $latestIds) {
@@ -1046,16 +1044,26 @@ class Proactiva {
                 }
             }
 
-            # --- Generación del Reporte ---
+            # --- [MODIFICADO] Generación del Reporte para caso VACÍO ---
             if ($allJobs.Count -eq 0) {
+                 # Aquí implementamos tu requerimiento específico:
+                 # Status = "No Configurado", el resto con guiones "-"
                  $this.backupActivityReport += [PSCustomObject]@{
-                    vCenter = $cisFQDN; Status = "No Backups Found"; Details = "No se pudo recuperar información."
+                    vCenter          = $cisFQDN
+                    Type             = "-"
+                    Status           = "No Configurado"
+                    "Data Transfer"  = "-"
+                    Location         = "-"
+                    StartTime        = "-"
+                    EndTime          = "-"
+                    Duration         = "-"
                  }
-                 Write-Host " -> Sin datos." -ForegroundColor Yellow
+                 Write-Host " -> Sin historial (Marcado como No Configurado)." -ForegroundColor Yellow
                  return
             }
             
-            # Ordenamos y seleccionamos los últimos 7 (Por si vienen del Intento 1 desordenados)
+            # Si hay datos, procesamos normalmente...
+            # Ordenamos y seleccionamos los últimos 7
             $backupHistory = $allJobs | Sort-Object start_time -Descending | Select-Object -First 7
             
             foreach ($job in $backupHistory) {
@@ -1071,7 +1079,7 @@ class Proactiva {
                     $duration = "{0:hh\:mm\:ss}" -f $ts
                 }
 
-                # Campos Exclusivos de Details (Si falló Intento 1, serán N/A)
+                # Campos Exclusivos de Details
                 $location = "N/A"
                 $sizeGB = "N/A"
                 $type = "N/A"
@@ -1084,12 +1092,8 @@ class Proactiva {
                     }
                 }
 
-                # El ID ya está garantizado por la lógica de arriba
-                $finalJobId = if ($job.id) { $job.id } else { "UnknownID" }
-
                 $this.backupActivityReport += [PSCustomObject]@{
                     vCenter          = $cisFQDN
-                    #JobId            = $finalJobId
                     Type             = $type
                     Status           = $status
                     "Data Transfer"  = $sizeGB
@@ -1104,8 +1108,6 @@ class Proactiva {
         }
         catch {
             Write-Warning "`nError en Backup Activity: $($_.Exception.Message)"
-            # Agregamos línea de error al excel para que no quede vacío
-            $this.backupActivityReport += [PSCustomObject]@{ vCenter = $cisFQDN; Status = "ERROR"; Details = $_.Exception.Message }
         }
     }
 
