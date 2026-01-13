@@ -484,26 +484,97 @@ class Proactiva {
             }
         }
     }
+    
     processVcenterSizing($vms, $hosts) {
-        Write-Host "`tProcessing Sizing...";
-        foreach ($vm in $vms) {
-            if ($vm.ExtensionData.Config.Annotation -in $this.annotations) {
-                for ($i = $this.vCenterSizing.vsphere.Count - 1; $i -ge 0; $i--) {
-                    if (($vm.NumCpu -ge $this.vCenterSizing.vsphere[$i].vcpus) -and ($vm.MemoryGB -ge $this.vCenterSizing.vsphere[$i].ram)) {
-                        $this.sizingReport += [PSCustomObject]@{
-                            vCenter             = $this.currentVCenter;
-                            VM                  = $vm.name;
-                            Annotation          = $vm.ExtensionData.Config.Annotation;
-                            vCPU                = $vm.NumCpu;
-                            "Memory GB"         = $vm.MemoryGB;
-                            "Cantidad de VMs"   = $vms.Count;
-                            "Cantidad de Hosts" = $hosts.length;
-                            "Sizing actual"     = $this.vCenterSizing.vsphere[$i].ToString
-                        }
-                    }
-                }
+        Write-Host "`tProcessing Sizing..." -NoNewline
+        
+        # --- Extracción robusta del nombre del vCenter ---
+        $rawVCenter = $this.currentVCenter
+        $vcenterName = if ($rawVCenter.Name) { $rawVCenter.Name } else { $rawVCenter }
+        
+        if ([string]::IsNullOrEmpty($vcenterName)) {
+            Write-Warning " -> Error: No se pudo determinar el nombre del vCenter."
+            return
+        }
+        
+        # 1. BÚSQUEDA DE VM (Lógica Robusta)
+        $vcenterShortName = ($vcenterName).Split('.')[0]
+        
+        $targetVM = $vms | Where-Object { 
+            $_.Name -eq $vcenterName -or 
+            $_.Name -eq $vcenterShortName 
+        } | Select-Object -First 1
+
+        # Fallback: Intentar por Annotation
+        if (-not $targetVM) {
+            $targetVM = $vms | Where-Object { $_.ExtensionData.Config.Annotation -in $this.annotations } | Select-Object -First 1
+        }
+
+        # Si no aparece, reportamos "No detectado"
+        if (-not $targetVM) {
+            $this.sizingReport += [PSCustomObject]@{
+                vCenter             = $vcenterName
+                VM                  = "No encontrada"
+                Annotation          = "-"
+                vCPU                = "-"
+                "Memory GB"         = "-"
+                "Cantidad de VMs"   = $vms.Count
+                "Cantidad de Hosts" = $hosts.Count
+                "Sizing actual"     = "Unknown (VM not found)"
             }
-        } 
+            return
+        }
+
+        # 2. MATCHING DE SIZING
+        $sizingFound = $false
+        
+        for ($i = $this.vCenterSizing.vsphere.Count - 1; $i -ge 0; $i--) {
+            $ref = $this.vCenterSizing.vsphere[$i]
+            
+            # --- [CORRECCIÓN] Volvemos a la lógica original para el nombre ---
+            # Usamos la propiedad .ToString tal cual estaba en tu código viejo
+            $refName = $ref.ToString
+            
+            # (Fallback de seguridad por si acaso la propiedad no existe, para no dejar vacío)
+            if (-not $refName) { $refName = if ($ref.size) { $ref.size } else { $ref.name } }
+
+            $refCpu = $ref.vcpus
+            $refRam = $ref.ram
+
+            # Comparación (Mayor o Igual)
+            if (($targetVM.NumCpu -ge $refCpu) -and ($targetVM.MemoryGB -ge $refRam)) {
+                
+                $this.sizingReport += [PSCustomObject]@{
+                    vCenter             = $vcenterName
+                    VM                  = $targetVM.Name
+                    Annotation          = if ($targetVM.ExtensionData.Config.Annotation) { $targetVM.ExtensionData.Config.Annotation } else { "-" }
+                    vCPU                = $targetVM.NumCpu
+                    "Memory GB"         = [math]::Round($targetVM.MemoryGB, 0)
+                    "Cantidad de VMs"   = $vms.Count
+                    "Cantidad de Hosts" = $hosts.Count
+                    "Sizing actual"     = $refName
+                }
+                
+                $sizingFound = $true
+                break # Encontrado el perfil más alto que cumple, salimos.
+            }
+        }
+
+        # 3. CASO CUSTOM
+        if (-not $sizingFound) {
+            $this.sizingReport += [PSCustomObject]@{
+                vCenter             = $vcenterName
+                VM                  = $targetVM.Name
+                Annotation          = if ($targetVM.ExtensionData.Config.Annotation) { $targetVM.ExtensionData.Config.Annotation } else { "-" }
+                vCPU                = $targetVM.NumCpu
+                "Memory GB"         = [math]::Round($targetVM.MemoryGB, 0)
+                "Cantidad de VMs"   = $vms.Count
+                "Cantidad de Hosts" = $hosts.Count
+                "Sizing actual"     = "Custom / Undefined"
+            }
+        }
+        
+        Write-Host " -> OK." -ForegroundColor Green
     }
 
     processvDS($vdswitches) {
