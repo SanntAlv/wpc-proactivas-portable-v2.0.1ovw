@@ -38,6 +38,10 @@ class Proactiva {
 
     processEsxi($hosts) {
         Write-Host "`tProcessing ESXi..." -NoNewline
+        
+        # [CONTEXTO] Capturamos el servidor actual para usarlo en comandos críticos
+        $serverContext = $this.currentVCenter
+
         for ($count = 0; $count -lt $hosts.length; $count++) {
             Show-Progress $hosts.length ($count + 1)
             $h = $hosts[$count]
@@ -85,34 +89,38 @@ class Proactiva {
                 $certIssuer = ""
                 
                 try {
-                    # 1. Obtenemos el CertificateManager del Host usando Get-View (Como en el script que encontraste)
-                    $certMgr = Get-View -Id $h.ExtensionData.ConfigManager.CertificateManager -ErrorAction Stop
-                    
-                    # 2. Leemos la propiedad CertificateInfo
-                    if ($certMgr.CertificateInfo) {
-                        $certInfo = $certMgr.CertificateInfo
+                    # --- [CORRECCIÓN] Usamos -Server para asegurar que buscamos en el vCenter correcto ---
+                    # También validamos que el host tenga un CertificateManager antes de consultar
+                    if ($h.ExtensionData.ConfigManager.CertificateManager) {
+                        $certMgr = Get-View -Id $h.ExtensionData.ConfigManager.CertificateManager -Server $serverContext -ErrorAction Stop
                         
-                        # 3. Extraemos la fecha (NotAfter) y el Emisor
-                        $certValidToDate = $certInfo.NotAfter
-                        $certValidTo = Get-Date $certValidToDate -Format "yyyy-MM-dd"
-                        $certIssuer = $certInfo.Issuer
-                        
-                        # 4. Calculamos el Status
-                        $hoy = Get-Date
-                        if ($hoy -gt $certValidToDate) {
-                            $certStatus = "Expired"
-                        } elseif ($hoy.AddMonths(1) -gt $certValidToDate) {
-                            $certStatus = "Expiration imminent"
-                        } elseif ($hoy.AddMonths(2) -gt $certValidToDate) {
-                            $certStatus = "Expiration shortly"
-                        } elseif ($hoy.AddMonths(8) -gt $certValidToDate) {
-                            $certStatus = "Expiration soon"
-                        } else {
-                            $certStatus = "Valid"
+                        if ($certMgr.CertificateInfo) {
+                            $certInfo = $certMgr.CertificateInfo
+                            
+                            $certValidToDate = $certInfo.NotAfter
+                            $certValidTo = Get-Date $certValidToDate -Format "yyyy-MM-dd"
+                            $certIssuer = $certInfo.Issuer
+                            
+                            $hoy = Get-Date
+                            if ($hoy -gt $certValidToDate) {
+                                $certStatus = "Expired"
+                            } elseif ($hoy.AddMonths(1) -gt $certValidToDate) {
+                                $certStatus = "Expiration imminent"
+                            } elseif ($hoy.AddMonths(2) -gt $certValidToDate) {
+                                $certStatus = "Expiration shortly"
+                            } elseif ($hoy.AddMonths(8) -gt $certValidToDate) {
+                                $certStatus = "Expiration soon"
+                            } else {
+                                $certStatus = "Valid"
+                            }
                         }
                     }
                 }
-                catch {}
+                catch {
+                    # Opcional: Descomentar para debug si sigue fallando
+                    # Write-Warning "Fallo certificado host $($h.Name): $($_.Exception.Message)"
+                }
+
                 $hostModel = $hclResult.Model
                 $supported = if ($hclResult.Supported) { "True" } else { "False" }
                 $supportedReleases = $hclResult.SupportedReleases -join ","
@@ -139,7 +147,7 @@ class Proactiva {
             }
 
             $this.esxiReport += [PSCustomObject] @{
-                vCenter                     = $this.currentVCenter
+                vCenter                     = $this.currentVCenter # Usamos el nombre del objeto
                 Hostname                    = $h.Name
                 Model                       = $hostModel
                 Datacenter                  = ($h | Get-Datacenter).Name
