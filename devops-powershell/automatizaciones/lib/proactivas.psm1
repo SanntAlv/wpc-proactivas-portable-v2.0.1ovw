@@ -828,7 +828,6 @@ class Proactiva {
             "Root User"       = $rootUser
             "Expiration Date" = $expirationDate
             "Days Remaining"  = $daysRemaining
-            "Data Status"     = $rootStatus
         }
         
         Write-Host " -> OK." -ForegroundColor Green
@@ -1173,7 +1172,6 @@ class Proactiva {
 
                 $this.backupActivityReport += [PSCustomObject]@{
                     vCenter          = $cisFQDN
-                    JobId            = if ($job.id) { $job.id } else { "Unknown" }
                     Type             = $type
                     Status           = $status
                     "Data Transfer"  = $sizeGB
