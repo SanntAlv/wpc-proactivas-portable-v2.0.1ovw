@@ -1057,32 +1057,47 @@ class Proactiva {
     }
 
     processBackupActivity() {
-        Write-Host "`tProcessing Backup Activity (Smart Fallback)..." -NoNewline
+        Write-Host "`tProcessing Backup Activity (Smart Fallback + Context)..." -NoNewline
         
-        $cisFQDN = $this.currentVCenter.Name
-        if (-not $cisFQDN) { $cisFQDN = $this.currentVCenter }
+        # 1. Obtener nombre limpio del vCenter para el reporte
+        $rawVCenter = $this.currentVCenter
+        $cisFQDN = if ($rawVCenter.Name) { $rawVCenter.Name } else { $rawVCenter }
         
         Import-Module VMware.VimAutomation.Cis.Core -ErrorAction SilentlyContinue
+
+        # 2. Obtener la conexión CIS específica para este vCenter
+        $cisConnection = $global:cisConnections[$cisFQDN]
+
+        # Fallback: Si no está en el llavero, buscar en las conexiones globales por nombre
+        if (-not $cisConnection) {
+            $cisConnection = $global:DefaultCisServers | Where-Object { $_.Name -eq $cisFQDN } | Select-Object -First 1
+        }
+
+        if (-not $cisConnection) {
+            Write-Warning " -> No hay conexión CIS activa para $cisFQDN. (Error de permisos/conexión previa)"
+            $this.backupActivityReport += [PSCustomObject]@{
+                vCenter = $cisFQDN; Type = "-"; Status = "Error de Conexión CIS"; "Data Transfer" = "-"; Location = "-"; StartTime = "-"; EndTime = "-"; Duration = "-"
+            }
+            return
+        }
 
         try {
             $allJobs = @()
             $usandoDetalles = $false
 
-            # --- INTENTO 1: Usar el servicio de DETALLES (Rico en datos) ---
+            # --- INTENTO 1: Servicio de DETALLES (Rico en datos) ---
             try {
                 $detailServiceName = "com.vmware.appliance.recovery.backup.job.details"
-                $detailsService = Get-CisService -Name $detailServiceName | Select-Object -First 1
+                # [CORRECCIÓN] Usamos -Server (no -CisServer)
+                $detailsService = Get-CisService -Name $detailServiceName -Server $cisConnection -ErrorAction SilentlyContinue | Select-Object -First 1
 
                 if ($detailsService) {
                     $jobsMap = $detailsService.list($null)
                     
                     if ($jobsMap) {
-                        # Recorremos el diccionario para preservar el ID
                         foreach ($entry in $jobsMap.GetEnumerator()) {
                             $jobObj = $entry.Value
                             $jobIdKey = $entry.Key
-                            
-                            # Inyectamos el ID en el objeto si no lo tiene
                             if ($null -eq $jobObj.id) {
                                 $jobObj | Add-Member -MemberType NoteProperty -Name "id" -Value $jobIdKey -Force
                             }
@@ -1091,42 +1106,33 @@ class Proactiva {
                         $usandoDetalles = $true
                     }
                 }
-            } catch {
-                # Si falla el servicio de detalles, seguimos silenciosamente al intento 2
-            }
+            } catch { }
 
-            # --- INTENTO 2 (Fallback): Usar el servicio SIMPLE (Solo estado y fechas) ---
-            # Solo entramos aquí si el intento 1 no trajo nada
+            # --- INTENTO 2: Servicio SIMPLE (Solo estado y fechas) ---
             if ($allJobs.Count -eq 0) {
-                $simpleServiceName = "com.vmware.appliance.recovery.backup.job" | Select-Object -First 1
-                $simpleService = Get-CisService -Name $simpleServiceName -ErrorAction Stop
+                $simpleServiceName = "com.vmware.appliance.recovery.backup.job"
+                # [CORRECCIÓN] Usamos -Server
+                $simpleService = Get-CisService -Name $simpleServiceName -Server $cisConnection -ErrorAction SilentlyContinue | Select-Object -First 1
                 
                 if ($simpleService) {
-                    # 1. Obtenemos solo la lista de IDs
-                    $jobIds = $simpleService.list()
+                    # Obtenemos la lista y aseguramos que sea un array de strings limpio
+                    $rawList = $simpleService.list()
+                    # A veces viene como objeto con propiedad Value, a veces directo. Esto lo normaliza:
+                    if ($rawList.Value) { $jobIds = $rawList.Value } else { $jobIds = $rawList }
                     
-                    # 2. Ordenamos los IDs (que tienen fecha) para procesar solo los últimos 7
-                    $latestIds = $jobIds | Sort-Object -Descending | Select-Object -First 7
-
-                    foreach ($jid in $latestIds) {
+                    foreach ($jid in $jobIds) {
                          try { 
-                             # Obtenemos el objeto de estado básico
                              $j = $simpleService.get($jid)
-                             
-                             # Aseguramos que tenga el ID pegado
-                             if (!$j.id) { 
-                                 $j | Add-Member -MemberType NoteProperty -Name "id" -Value $jid -Force 
-                             }
+                             if (!$j.id) { $j | Add-Member -Name "id" -Value $jid -Force }
                              $allJobs += $j
                          } catch {}
                     }
                 }
             }
 
-            # --- [MODIFICADO] Generación del Reporte para caso VACÍO ---
+            # --- Generación del Reporte ---
             if ($allJobs.Count -eq 0) {
-                 # Aquí implementamos tu requerimiento específico:
-                 # Status = "No Configurado", el resto con guiones "-"
+                 # Caso VACÍO: Marcamos como "No Configurado"
                  $this.backupActivityReport += [PSCustomObject]@{
                     vCenter          = $cisFQDN
                     Type             = "-"
@@ -1141,27 +1147,21 @@ class Proactiva {
                  return
             }
             
-            # Si hay datos, procesamos normalmente...
-            # Ordenamos y seleccionamos los últimos 7
+            # Procesamiento Normal
             $backupHistory = $allJobs | Sort-Object start_time -Descending | Select-Object -First 7
             
             foreach ($job in $backupHistory) {
-                # Campos Comunes
                 $status = if ($job.state) { $job.state } else { $job.status }
                 $startTime = Get-Date $job.start_time -Format "yyyy-MM-dd HH:mm:ss"
                 $endTime = Get-Date $job.end_time -Format "yyyy-MM-dd HH:mm:ss"
                 
-                # Duración
                 $duration = "N/A"
                 if ($job.end_time -and $job.start_time) {
                     $ts = New-TimeSpan -Start $job.start_time -End $job.end_time
                     $duration = "{0:hh\:mm\:ss}" -f $ts
                 }
 
-                # Campos Exclusivos de Details
-                $location = "N/A"
-                $sizeGB = "N/A"
-                $type = "N/A"
+                $location = "N/A"; $sizeGB = "N/A"; $type = "N/A"
 
                 if ($usandoDetalles) {
                     if ($job.location) { $location = $job.location }
@@ -1173,6 +1173,7 @@ class Proactiva {
 
                 $this.backupActivityReport += [PSCustomObject]@{
                     vCenter          = $cisFQDN
+                    JobId            = if ($job.id) { $job.id } else { "Unknown" }
                     Type             = $type
                     Status           = $status
                     "Data Transfer"  = $sizeGB
@@ -1187,6 +1188,9 @@ class Proactiva {
         }
         catch {
             Write-Warning "`nError en Backup Activity: $($_.Exception.Message)"
+            $this.backupActivityReport += [PSCustomObject]@{
+                vCenter = $cisFQDN; Type = "-"; Status = "Error API: $($_.Exception.Message)"; "Data Transfer" = "-"; Location = "-"; StartTime = "-"; EndTime = "-"; Duration = "-"
+            }
         }
     }
 

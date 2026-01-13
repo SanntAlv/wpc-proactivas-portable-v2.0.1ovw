@@ -175,7 +175,7 @@ function Connect-Endpoints($modules) {
     }
 }
 
-function Connect-Endpoint($component){
+#unction Connect-Endpoint($component){
 	# if($component -eq "vcenter"){
 	# 	"Debe conectarse a un vCenter. Ingrese los parametros para conectarse"
 	# 	$server = Read-Host "Host"
@@ -187,7 +187,7 @@ function Connect-Endpoint($component){
 	# 	$newConnection = [PSCustomObject] @{component=$component; host=$connection.Name; conn=$connection}
 	# 	$global:connections += $newConnection
 	# }
-}
+#}
 
 function Disconnect-Endpoints {
     foreach ($conn in $global:connections) {
