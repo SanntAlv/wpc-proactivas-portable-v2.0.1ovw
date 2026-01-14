@@ -2061,7 +2061,6 @@ function backupCheck {
         $backups = $grupo.Group | Sort-Object StartTime -Descending 
         
         $vcenterTieneProblemas = $false
-        $mensajeProblema = ""
 
         # --- A. ANÁLISIS DE INTEGRIDAD Y ESTADO ---
         # Primero revisamos si hay fallos o manuales para levantar la bandera
@@ -2139,7 +2138,6 @@ function backupCheck {
 
                 $informeFinal += [PSCustomObject]@{
                     "vCenter"       = $nombreVcenter
-                    "JobId"         = $fila.JobId
                     "Type"          = $fila.Type
                     "Status"        = $fila.Status
                     "StartTime"     = $fila.StartTime
@@ -2240,7 +2238,7 @@ function vdsBackupCheck {
     else {
         # Caso Éxito Total
         $resultadoChecklist = "Resultado Esperado"
-        $detalleChecklist = "Se realizaron los backups correctamente. Chequear path: $rutaBackups"
+        $detalleChecklist = "Se realizaron los backups correctamente. Recuerde adjuntar los archivos a Drive. Chequear path: $rutaBackups"
     }
 
     # 5. Retornar objeto para el Checklist
