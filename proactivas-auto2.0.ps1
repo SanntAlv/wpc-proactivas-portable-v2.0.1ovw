@@ -1924,18 +1924,34 @@ function performanceHealthCheck {
 }
 
 function alarmCheck {
-    # 1. Importar datos
-    # Usamos try/catch para evitar error rojo si la hoja no existe aún
-    $todosLosDatos = Get-ChildItem -Path $excelMasReciente -Filter *.xlsx | ForEach-Object {
-        Import-Excel -Path $_.FullName -WorksheetName "Falso Positivo"
-    } | Where-Object { -not [string]::IsNullOrEmpty($_.vCenter) }
+    # 1. Importar datos (SOLO DEL ARCHIVO MÁS RECIENTE)
+    # Buscamos el .xlsx más nuevo en la carpeta para evitar sumar reportes viejos
+    $archivoMasNuevo = Get-ChildItem -Path $rutaArchivos -Filter *.xlsx | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+    
+    if (-not $archivoMasNuevo) {
+        return [PSCustomObject]@{
+            ID        = "VSP-ME-13" 
+            Resultado = "Sin acceso"
+            Detalle   = "No se encontraron archivos Excel de reporte en la ruta indicada."
+        }
+    }
 
-    # --- CONDICIÓN GLOBAL: SIN ACCESO ---
+    # Intentamos leer la hoja
+    $todosLosDatos = try { 
+        Import-Excel -Path $archivoMasNuevo.FullName -WorksheetName "Falso Positivo" -ErrorAction Stop 
+    } catch { $null }
+    
+    # Filtramos filas vacías
+    if ($todosLosDatos) {
+        $todosLosDatos = $todosLosDatos | Where-Object { -not [string]::IsNullOrEmpty($_.vCenter) }
+    }
+
+    # --- CONDICIÓN GLOBAL: HOJA VACÍA ---
     if (-not $todosLosDatos -or $todosLosDatos.Count -eq 0) {
         return [PSCustomObject]@{
-            ID        = "VSP-MON-02" 
+            ID        = "VSP-ME-13" 
             Resultado = "Sin acceso"
-            Detalle   = "No se encontraron registros de alarmas (hoja vacía o no generada). Verificar recolección."
+            Detalle   = "No se encontraron registros de la prueba de alarmas en el archivo '$($archivoMasNuevo.Name)'."
         }
     }
 
@@ -1943,55 +1959,67 @@ function alarmCheck {
     $countExitos = 0
     $countFallas = 0
     $causas = @()
+    $tokensEncontrados = @()
 
     # 2. Procesar cada fila
     foreach ($fila in $todosLosDatos) {
-        $resultado = $fila.Result
+        $resultado = if ($fila.Result) { $fila.Result.ToString().Trim() } else { "" }
+        
+        # Normalizamos nombres
+        $nombreAlarma = if ($fila."Alarm Name") { $fila."Alarm Name" } else { $fila."Alarm Source" }
+        $rutaScript   = if ($fila."Script Path") { $fila."Script Path" } else { $fila."Alarm Path" }
+        if (-not $rutaScript) { $rutaScript = $fila."Path Alarma" }
+
         $esHallazgo = $false
         $diagnostico = ""
 
-        # Normalizamos nombres de columnas (Compatibilidad con versiones anteriores del script)
-        $nombreAlarma = if ($fila."Alarm Name") { $fila."Alarm Name" } else { $fila."Alarm Source" }
-        $rutaScript   = if ($fila."Script Path") { $fila."Script Path" } else { $fila."Path Alarma" }
-        # Si sigue vacío, probamos el otro nombre posible
-        if (-not $rutaScript) { $rutaScript = $fila."Alarm Path" }
-
-        # Lógica de Éxito: SUCCESS, OK o "SUCCESS - ..."
-        if ($resultado -match "SUCCESS" -or $resultado -eq "OK" -or $resultado -eq "Not Found") {
+        # --- VALIDACIÓN DE ÉXITO ---
+        if ($resultado -eq "OK" -or $resultado -match "^SUCCESS") {
             $countExitos++
+
+            # Análisis de Tokens (Solo en éxitos)
+            if (-not [string]::IsNullOrEmpty($rutaScript) -and $rutaScript -ne "N/A") {
+                $partes = $rutaScript -split "\s+"
+                if ($partes.Count -gt 1) {
+                    $token = ($partes[1..($partes.Count - 1)]) -join " "
+                    $tokensEncontrados += $token
+                }
+            }
         }
         else {
-            # Es un fallo (Error técnico, mala configuración, etc.)
+            # CASO FALLO
             $countFallas++
             $esHallazgo = $true
             
-            # Diagnóstico inteligente
-            if ($resultado -like "*No Script*") { 
-                $diagnostico = "Falta script en configuración"
-                if ("Configuración incompleta" -notin $causas) { $causas += "Configuración incompleta" }
-            }
-            elseif ($resultado -like "*Script Action Empty*") {
-                $diagnostico = "Acción de script vacía"
-                if ("Configuración incompleta" -notin $causas) { $causas += "Configuración incompleta" }
-            }
-            elseif ($resultado -like "*Not Found*") {
-                $diagnostico = "Alarma no encontrada en vCenter"
-                if ("Alarmas faltantes" -notin $causas) { $causas += "Alarmas faltantes" }
-            }
-            elseif ($resultado -like "*No hay hosts*") {
-                $diagnostico = "Sin hosts conectados"
-                if ("Entorno no disponible" -notin $causas) { $causas += "Entorno no disponible" }
-            }
-            elseif ($resultado -like "*Failed*") {
-                $diagnostico = "Fallo en ejecución (Smoke Test)"
-                if ("Fallo funcional" -notin $causas) { $causas += "Fallo funcional" }
-            }
-            else {
-                $diagnostico = "Error/Advertencia: $resultado"
-                if ("Errores varios" -notin $causas) { $causas += "Errores varios" }
+            # Diagnóstico Inteligente
+            switch -Wildcard ($resultado) {
+                "*No Script Configured*" { 
+                    $diagnostico = "Configuración: Alarma sin acción de script"
+                    if ("Alarmas sin configurar" -notin $causas) { $causas += "Alarmas sin configurar" }
+                }
+                "*Script Action Empty*" { 
+                    $diagnostico = "Configuración: Acción de script vacía"
+                    if ("Alarmas sin configurar" -notin $causas) { $causas += "Alarmas sin configurar" }
+                }
+                "*Not Found*" { 
+                    $diagnostico = "Alarma no encontrada en vCenter"
+                    if ("Alarmas faltantes" -notin $causas) { $causas += "Alarmas faltantes" }
+                }
+                "*No hay hosts*" { 
+                    $diagnostico = "Sin hosts conectados"
+                    if ("Entorno no disponible" -notin $causas) { $causas += "Entorno no disponible" }
+                }
+                "*Failed*" { 
+                    $diagnostico = "Fallo funcional (Smoke Test)"
+                    if ("Fallo funcional" -notin $causas) { $causas += "Fallo funcional" }
+                }
+                Default { 
+                    $diagnostico = "Error: $resultado"
+                    if ("Errores varios" -notin $causas) { $causas += "Errores varios" }
+                }
             }
 
-            # 3. Guardar en Anexo
+            # Guardar en Anexo
             $informeFinal += [PSCustomObject]@{
                 "vCenter"     = $fila.vCenter
                 "Host"        = $fila.Host
@@ -2004,25 +2032,36 @@ function alarmCheck {
         }
     }
 
-    # 4. Definir Resultado Checklist
+    # 3. Definir Resultado del Checklist
     $resultadoChecklist = "Resultado Esperado"
     $detalleChecklist = "Se verificaron $countExitos alarmas/pruebas correctamente."
+
+    # Análisis de Consistencia de Tokens
+    $tokensUnicos = @($tokensEncontrados | Select-Object -Unique)
+    $notaInconsistencia = ""
+    
+    if ($tokensUnicos.Count -gt 1) {
+        $notaInconsistencia = " (Nota: Se detectaron $($tokensUnicos.Count) variantes de tokens/argumentos)."
+        # Agregamos la nota al detalle de éxito también
+        $detalleChecklist += $notaInconsistencia
+    }
 
     if ($countFallas -gt 0) {
         $resultadoChecklist = "No recomendado"
         $resumenCausas = $causas -join ", "
-        $detalleChecklist = "Se detectaron $countFallas anomalías. Causas: $resumenCausas."
+        $detalleChecklist = "Se detectaron $countFallas anomalías. Causas: $resumenCausas.$notaInconsistencia"
     }
 
-    # 5. Exportar al Anexo
+    # 4. Exportar al Anexo Técnico
     if ($informeFinal.Count -gt 0) {
         Exportar-InformeConEstilo -Datos $informeFinal `
                                   -RutaArchivo $archivoSalida `
                                   -NombreHoja "Falso Positivo"
     }
 
+    # 5. Retornar objeto
     return [PSCustomObject]@{
-        ID        = "VSP-MON-02" 
+        ID        = "VSP-ME-13" 
         Resultado = $resultadoChecklist
         Detalle   = $detalleChecklist
     }
