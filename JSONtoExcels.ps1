@@ -64,6 +64,7 @@ foreach ($nombreJson in $listaDeArchivosJson) {
                 if ($sheet.Name -eq 'VMkernel Adapters') { $exportParams['NoNumberConversion'] = @('Host', 'IP') }
                 if ($sheet.Name -eq 'vNetwork') { $exportParams['NoNumberConversion'] = @('Host') }
                 if ($sheet.Name -eq 'Falso Positivo') { $exportParams['NoNumberConversion'] = @('Host') }
+                if ($sheet.Name -eq 'Compatibilidad de Componentes') { $exportParams['NoNumberConversion'] = @('Hostname') }
 
                 $sheet.Value | Export-Excel @exportParams
             }

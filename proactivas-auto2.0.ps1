@@ -1311,7 +1311,7 @@ function Licencia {
         $expiraRaw = $licencia.ExpirationDate
         $esProblematicaInicial = $false
 
-        if ([int]$licencia.Used -gt [int]$licencia.Total) {
+        if ($licencia.Used -gt $licencia.Total) {
             $encontroExcedida = $true
             $esProblematicaInicial = $true
         }
